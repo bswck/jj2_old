@@ -61,7 +61,12 @@ class Protocol:
         registry = self._registry.copy()
         for registrar, conditions in self._registry.items():
             for key, condition in conditions.items():
-                if not self.condition_check(condition, self._config.get(key)):
+                value = self._config.get(key)
+                if callable(condition):
+                    ok = condition(value)
+                else:
+                    ok = condition == value
+                if not ok:
                     del registry[registrar]
         self.ok_payloads = list(filter(lambda payload: payload in self._cases, registry))
 
@@ -109,7 +114,12 @@ class Protocol:
             for target, bulk_condition in handlers.items():
                 for cond_type, data in (('config', self._config), ('schema', payload.data())):
                     for key, condition in bulk_condition[cond_type].items():
-                        if self.condition_check(condition, data.get(key)):
+                        value = data.get(key)
+                        if callable(condition):
+                            ok = condition(value)
+                        else:
+                            ok = condition == value
+                        if ok:
                             handler = _PrioritizedHandler(fn, target, bulk_condition['priority'])
                             heapq.heappush(handlers, handler)
         self.call_handlers(payload, handlers)
@@ -135,12 +145,6 @@ class Protocol:
             file=sys.stderr
         )
         traceback.print_exc()
-
-    @staticmethod
-    def condition_check(condition, value):
-        if callable(condition):
-            return condition(value)
-        return condition == value
 
 
 def takes_recipient(fn):

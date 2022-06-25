@@ -120,12 +120,25 @@ def player_array(with_client_id):
 
 
 class GameplayProtocol(Protocol):
-    def __init__(self, receiver, sender, **config):
-        super().__init__(**config)
+    def __init__(
+            self,
+            chat=True,
+            notice_players=True,
+            download_files=True,
+            update_latencies=True,
+            spectating=True,
+            **config
+    ):
+        super().__init__(
+            chat=chat,
+            notice_players=notice_players,
+            download_files=download_files,
+            update_latencies=update_latencies,
+            spectating=spectating,
+            **config
+        )
         self._deficit = 0
         self._buffer = bytearray()
-        self.receiver = receiver
-        self.sender = sender
 
     def data_received(self, data: bytes):
         length = eof = len(data)
@@ -179,7 +192,7 @@ class GameplayPayload(AbstractPayload, ConstructPayload):
     has_deferred_data = True
 
     def pick(self, context):
-        return self.impls[self._data['packet_id']]
+        return self.impls.get(self._data['packet_id'])
 
     def serialize(self, context, checksum=False):
         buffer = super().serialize(context)
@@ -461,7 +474,7 @@ class SpectateRequest(ConstructPayload):
 
     def feed(self, changes):
         if 'spectating' in changes:
-            changes['spectating'] += 20  # (bswck): figure out what this really means
+            changes['spectating'] = 20 + (changes['spectating'] % 2)
         super().feed(changes)
 
 
@@ -504,9 +517,9 @@ class ScriptList(ConstructPayload):
     )
 
 
-GameplayProtocol.register(ChatMessage, read_chat=True)
+GameplayProtocol.register(ChatMessage, chat=True)
 GameplayProtocol.register(ClientDisconnect, notice_players=True)
-GameplayProtocol.register(ConsoleMessage, read_chat=True)
+GameplayProtocol.register(ConsoleMessage, chat=True)
 GameplayProtocol.register(DownloadingFile, download_files=True)
 GameplayProtocol.register(DownloadRequest, download_files=True)
 GameplayProtocol.register(EndOfLevel)

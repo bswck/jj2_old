@@ -66,8 +66,11 @@ class AbstractPayload(Payload, abc.ABC, has_identity=False):
     def deserialize(self, buffer, context):
         super().deserialize(buffer, context)
         impl = self.pick(context)
-        impl.deserialize(self.data(for_impl=True), context)
-        self.feed({impl.identity: impl.data()})
+        if impl is None:
+            impl = self
+        else:
+            impl.deserialize(self.data(for_impl=True), context)
+            self.feed({impl.identity: impl.data()})
         return impl
 
     @abc.abstractmethod
