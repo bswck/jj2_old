@@ -1,41 +1,40 @@
+import abc
+import asyncio
 import enum
 import functools
 
 from construct import (
     Enum, PaddedString, Byte, Bytes, GreedyBytes, Struct, PascalString, this, Switch, Int,
     Optional, Pass, PrefixedArray, Short, Default, CString, GreedyRange, Int32ul, Int16ul,
-    GreedyString, Int8sb, Bitwise, BitsSwapped, Array, OneOf, If
+    GreedyString, Int8sb, Bitwise, BitsSwapped, Array, OneOf, If, BitStruct, Padding,
+    possiblestringencodings
 )
 
-from jj2.lib import Payload, AbstractPayload, Protocol
+from jj2.lib import AbstractPayload, Protocol
+
 
 MAIN_ENCODING = 'cp1250'
-
-
-class ConstructPayload(Payload, has_identity=False):
-    struct = Struct()
-    has_deferred_data = False
-
-    def _serialize(self, context):
-        return self.struct.build(self.data())
-
-    def _deserialize(self, buffer, context):
-        return self.struct.parse(buffer)
-
-    def __init_subclass__(cls, compile_struct=not __debug__):
-        if compile_struct and cls.struct is not None:
-            cls.struct = cls.struct.compile()
-
-    def data(self, for_impl=False):
-        if for_impl and self.has_deferred_data:
-            return self._data['deferred']
-        return self._data
+possiblestringencodings[MAIN_ENCODING] = 1
 
 
 @functools.partial(Enum, PaddedString(4, 'ascii'))
 class MajorVersionString(str, enum.Enum):
     v1_23 = '21  '
     v1_24 = '24  '
+
+
+@functools.partial(Enum, Byte)
+class Character(enum.IntEnum):
+    JAZZ = 0
+    SPAZ = 1
+    BIRD = 2
+    LORI = FROG = 3
+
+
+@functools.partial(Enum, Byte)
+class Team(enum.IntEnum):
+    BLUE = 0
+    RED = 1
 
 
 @functools.partial(Enum, Byte)
@@ -46,6 +45,21 @@ class GameMode(enum.IntEnum):
     RACE = 3
     TREASURE_HUNT = 4
     CTF = 5
+
+
+@functools.partial(Enum, Byte)
+class CustomGameMode(enum.IntEnum):
+    OFF = 0
+    ROAST_TAG = 1
+    LRS = 2
+    XLRS = 3
+    PESTILENCE = 4
+    TEAM_BATTLE = 11
+    JAILBREAK = 12
+    DEATH_CTF = 13
+    FLAG_RUN = 14
+    TLRS = 15
+    DOMINATION = 16
 
 
 @functools.partial(Enum, Byte)
@@ -99,13 +113,13 @@ DISCONNECT_MESSAGES = {
 }
 
 
-def player_array(with_client_id):
+def player_array(*, with_client_id):
     kwds = {}
     if with_client_id:
         kwds.update(client_id=Byte)
     kwds.update(
         player_id=Byte,
-        team=Byte,
+        team=Team,
         char=Byte,
         fur_color=Byte[4],
         sprite_mode=Default(Byte, 17),
@@ -119,26 +133,40 @@ def player_array(with_client_id):
     return Struct(**kwds)
 
 
-class GameplayProtocol(Protocol):
+class GameplayProtocol(Protocol, asyncio.Protocol):
     def __init__(
             self,
+            parent=None, *,
+            capture_packets=True,
             chat=True,
             notice_players=True,
             download_files=True,
             update_latencies=True,
             spectating=True,
+            bot=True,
             **config
     ):
         super().__init__(
+            parent,
+            capture_packets=capture_packets,
             chat=chat,
             notice_players=notice_players,
             download_files=download_files,
             update_latencies=update_latencies,
             spectating=spectating,
+            bot=bot,
             **config
         )
         self._deficit = 0
         self._buffer = bytearray()
+        self._tcp_transport = None
+        self._udp_transport = None
+
+    def connection_made(self, transport):
+        if hasattr(transport, 'sendto'):
+            self._udp_transport = transport
+        else:
+            self._tcp_transport = transport
 
     def data_received(self, data: bytes):
         length = eof = len(data)
@@ -164,13 +192,13 @@ class GameplayProtocol(Protocol):
                 eof -= deficit
                 deficit = 0
         else:
-            raise ValueError(f'{deficit=} is less than 0')
+            raise ValueError(f'{deficit=} < 0')
 
         self._buffer.extend(data[bof:eof])
         self._deficit = deficit
 
         if deficit == 0:
-            payload = GameplayPayload.from_serialized(buffer=bytes(self._buffer))
+            payload = GameplayPayload.from_buffer(buffer=bytes(self._buffer))
             self.handle(payload)
             self._buffer.clear()
             if eof < length:
@@ -178,39 +206,66 @@ class GameplayProtocol(Protocol):
                 self.data_received(tail)
 
     def datagram_received(self, data: bytes):
-        payload = GameplayPayload.from_serialized(buffer=bytes(data), checksum=data[:2])
+        payload = GameplayPayload.from_buffer(buffer=bytes(data), checksum=data[:2])
         if payload:
             self.handle(payload)
 
 
-class GameplayPayload(AbstractPayload, ConstructPayload):
+class BinaryPayload(AbstractPayload, abc.ABC, has_feed=False):
+    struct = Struct(buffer=GreedyBytes)
+    feeds = 'buffer'
+    has_default_implementation = True
+
+    def _serialize(self, context):
+        return self.struct.build(self.data(deserialization=False))
+
+    def _deserialize(self, buffer, context):
+        data = self.struct.parse(buffer)
+        del data['_io']
+        return data
+
+    def __init_subclass__(cls, compile_struct=not __debug__, feeds=None):
+        if compile_struct and cls.struct is not None:
+            cls.struct = cls.struct.compile()
+        if feeds:
+            cls.feeds = feeds
+        super().__init_subclass__()
+
+
+class GameplayPayload(BinaryPayload):
     struct = Struct(
         packet_id=Byte,
-        deferred=GreedyBytes
+        buffer=GreedyBytes
     )
+    has_default_implementation = False
 
-    has_deferred_data = True
-
-    def pick(self, context):
+    def _pick(self, context):
         return self.impls.get(self._data['packet_id'])
 
-    def serialize(self, context, checksum=False):
-        buffer = super().serialize(context)
-        if checksum:
-            buffer = self.checksum(buffer) + buffer
-        return buffer
+    def _impl_data(self, deserialization=False):
+        return self._data['buffer']
 
-    def checksum(self, buffer):
+    def serialize(self, context, checksum=False):
+        if self.serialize_cache is None:
+            buffer = super().serialize(context)
+            if checksum:
+                buffer = self.checksum(buffer) + buffer
+            self.feed(dict(buffer=buffer))
+            self.serialize_cache = self._serialize(context)
+        return self.serialize_cache
+
+    @staticmethod
+    def checksum(buffer):
         arr = bytes((79, 79)) + buffer
-        left = right = 1
+        lsb = msb = 1
         for i in range(2, len(arr)):
-            left += arr[i]
-            right += left
-        return Byte.build(left % 251) + Byte.build(right % 251)
+            lsb += arr[i]
+            msb += lsb
+        return Byte.build(lsb % 251) + Byte.build(msb % 251)
 
     @classmethod
-    def from_serialized(cls, buffer, checksum=None, context=None):
-        self = super().from_serialized(buffer=buffer, context=context)
+    def from_buffer(cls, buffer, checksum=None, context=None):
+        self = super().from_buffer(buffer=buffer, context=context)
         if checksum is not None:
             if self.checksum() != checksum:
                 self = None
@@ -221,7 +276,7 @@ packet_id = GameplayPayload.register
 
 
 @packet_id(0x03)
-class Ping(ConstructPayload):
+class Ping(BinaryPayload):
     struct = Struct(
         number_in_list=Byte,
         unknown_data=Byte[4],
@@ -230,7 +285,7 @@ class Ping(ConstructPayload):
 
 
 @packet_id(0x04)
-class Pong(ConstructPayload):
+class Pong(BinaryPayload):
     struct = Struct(
         number_in_list_from_ping=Byte,
         unknown_data=Byte[4],
@@ -239,14 +294,14 @@ class Pong(ConstructPayload):
 
 
 @packet_id(0x05)
-class Query(ConstructPayload):
+class Query(BinaryPayload):
     struct = Struct(
         number_in_list=Byte
     )
 
 
 @packet_id(0x06)
-class QueryReply(ConstructPayload):
+class QueryReply(BinaryPayload):
     struct = Struct(
         number_in_list=Byte,
         timer_sync=Byte,
@@ -263,16 +318,16 @@ class QueryReply(ConstructPayload):
 
 
 @packet_id(0x07)
-class GameEvent(ConstructPayload):
+class GameEvent(BinaryPayload):
     struct = Struct(
         udp_count=Byte,
-        event_id=Enum(Byte, GameEventType),
+        event_id=GameEventType,
         event_data=GreedyBytes
     )
 
 
 @packet_id(0x09)
-class Heartbeat(ConstructPayload):
+class Heartbeat(BinaryPayload):
     struct = Struct(
         udp_count=Byte,
         send_back=GreedyBytes,
@@ -280,7 +335,7 @@ class Heartbeat(ConstructPayload):
 
 
 @packet_id(0x0D)
-class ClientDisconnect(ConstructPayload):
+class ClientDisconnect(BinaryPayload):
     struct = Struct(
         disconnect_message=Enum(Byte, **DISCONNECT_MESSAGES),
         client_id=Int8sb,
@@ -294,7 +349,7 @@ class ClientDisconnect(ConstructPayload):
 
 
 @packet_id(0x10)
-class ServerDetails(ConstructPayload):
+class ServerDetails(BinaryPayload):
     struct = Struct(
         client_id=Byte,
         player_id=Byte,
@@ -308,9 +363,9 @@ class ServerDetails(ConstructPayload):
                 level_challenge=Byte[4],
                 keep_alive_data=Byte[4],
                 plus_version=Short[2],
-                music_crc=Switch(Byte, [Pass, PrefixedArray(Byte, Byte)]),
+                music_crc=Switch(Byte, dict(enumerate([Pass, PrefixedArray(Byte, Byte)]))),
                 scripts=Switch(
-                    Byte, [
+                    Byte, dict(map(tuple, enumerate([
                         Pass,
                         Struct(script_crc=Byte[4]),
                         Struct(
@@ -318,7 +373,7 @@ class ServerDetails(ConstructPayload):
                             number_of_required_files=Byte,
                             number_of_optional_files=Byte
                         )
-                    ]
+                    ])))
                 )
             )
         )
@@ -326,7 +381,7 @@ class ServerDetails(ConstructPayload):
 
 
 @packet_id(0x11)
-class NewClient(ConstructPayload):
+class ClientDetails(BinaryPayload):
     struct = Struct(
         client_id=Byte,
         players=PrefixedArray(Byte, player_array(with_client_id=False))
@@ -334,7 +389,7 @@ class NewClient(ConstructPayload):
 
 
 @packet_id(0x12)
-class UpdatePlayers(ConstructPayload):
+class UpdatePlayers(BinaryPayload):
     struct = Struct(
         junk=Byte,
         players=GreedyRange(player_array(with_client_id=True))
@@ -342,18 +397,18 @@ class UpdatePlayers(ConstructPayload):
 
 
 @packet_id(0x13)
-class GameInit(ConstructPayload):
+class GameInit(BinaryPayload):
     struct = Struct()
 
 
 @packet_id(0x14)
-class DownloadingFile(AbstractPayload, ConstructPayload):
-    def pick(self, context):
-        return self.impls[context.get('is_first', False)]
+class DownloadingFile(BinaryPayload):
+    def _pick(self, context):
+        return self.impls.get(context.get('is_first', False))
 
 
 @DownloadingFile.register(True)
-class _DownloadingFileInit(ConstructPayload):
+class _DownloadingFileInit(BinaryPayload):
     struct = Struct(
         packet_count=Int32ul,
         unknown_data=Byte[4],
@@ -362,7 +417,7 @@ class _DownloadingFileInit(ConstructPayload):
 
 
 @DownloadingFile.register(False)
-class _DownloadingFileChunk(ConstructPayload):
+class _DownloadingFileChunk(BinaryPayload):
     struct = Struct(
         packet_count=Int32ul,
         file_content=GreedyBytes
@@ -370,12 +425,12 @@ class _DownloadingFileChunk(ConstructPayload):
 
 
 @packet_id(0x15)
-class DownloadRequest(ConstructPayload):
+class DownloadRequest(BinaryPayload):
     struct = Struct(file_name=PascalString(Byte, MAIN_ENCODING))
 
 
 @packet_id(0x16)
-class LevelCycled(ConstructPayload):
+class LevelCycled(BinaryPayload):
     struct = Struct(
         level_crc=Int,
         tileset_crc=Int,
@@ -389,72 +444,98 @@ class LevelCycled(ConstructPayload):
 
 
 @packet_id(0x17)
-class EndOfLevel(ConstructPayload):
+class EndOfLevel(BinaryPayload):
     struct = Struct(unknown_data=GreedyBytes)
 
 
 @packet_id(0x18)
-class UpdateEvents(ConstructPayload):
+class UpdateEvents(BinaryPayload):
     struct = Struct(
         checksum=Optional(Short),
         counter=Optional(Short),
-        unknown_data=Optional(GreedyString)
+        unknown_data=Optional(GreedyString(MAIN_ENCODING))
     )
 
 
 @packet_id(0x19)
-class ServerStopped(ConstructPayload):  # rip
+class ServerStopped(BinaryPayload):  # rip
     struct = Struct()
 
 
 @packet_id(0x1A)
-class UpdateRequest(ConstructPayload):
+class UpdateRequest(BinaryPayload):
     struct = Struct(
         level_challenge=Byte[4],
     )
 
 
 @packet_id(0x1B)
-class ChatMessage(ConstructPayload):
+class ChatMessage(BinaryPayload):
     struct = Struct(
         client_id=Byte,
         is_team_chat=Byte,
-        text=GreedyString,
+        text=GreedyString(MAIN_ENCODING),
     )
 
 
 @packet_id(0x3F)
-class PlusAcknowledgement(ConstructPayload):
+class PlusAcknowledgement(BinaryPayload):
+    def _pick(self, context):
+        return self.impls.get(context.get('client', False))
+
+    def _impl_data(self, deserialization=False):
+        return self._data['buffer']
+
+
+@PlusAcknowledgement.register(True)  # client-side
+class PlusRequest(BinaryPayload):
     struct = Struct(timestamp=PlusTimestamp)
 
 
+@PlusAcknowledgement.register(False)  # server-side
+class PlusDetails(BinaryPayload):
+    struct = Struct(
+        unknown=Byte,
+        health_info=Byte,
+        plus_data=BitStruct(
+            pad=Padding(4),
+            no_blink=Byte,
+            no_movement=Byte,
+            friendly_fire=Byte,
+            plus_only=Byte
+        )
+    )
+
+
 @packet_id(0x40)
-class ConsoleMessage(ConstructPayload):
+class ConsoleMessage(BinaryPayload):
     struct = Struct(
         message_type=Byte,
-        text=GreedyString
+        text=GreedyString(MAIN_ENCODING)
     )
 
 
 @packet_id(0x41)
-class Spectate(AbstractPayload, ConstructPayload):
+class Spectate(BinaryPayload):
     struct = Struct(
         packet_type=Byte,
-        deferred=GreedyBytes
+        buffer=GreedyBytes
     )
-    has_deferred_data = True
 
-    def pick(self, context):
+    def _pick(self, context):
         return self.impls[self._data['packet_type']]
+
+    def _impl_data(self, deserialization=False):
+        return self._data['buffer']
 
 
 @Spectate.register(0)
-class _EachSpectator(ConstructPayload):
+class _EachSpectator(BinaryPayload):
     struct = Struct(spectators=Array(4, BitsSwapped(Bitwise(Bytes(8)))))
 
 
 @Spectate.register(1)
-class _Spectators(ConstructPayload):
+class _Spectators(BinaryPayload):
     struct = Struct(
         spectators=GreedyRange(
             Struct(
@@ -467,7 +548,7 @@ class _Spectators(ConstructPayload):
 
 
 @packet_id(0x42)
-class SpectateRequest(ConstructPayload):
+class SpectateRequest(BinaryPayload):
     struct = Struct(
         spectating=OneOf(Byte, (20, 21))
     )
@@ -479,15 +560,19 @@ class SpectateRequest(ConstructPayload):
 
 
 @packet_id(0x45)
-class GameState(ConstructPayload):
+class GameState(BinaryPayload):
     struct = Struct(
-        state=Byte,
+        state=BitStruct(
+            pad=Padding(5),
+            in_overtime=Bytes(2),
+            game_started=Byte
+        ),
         time_left=Int
     )
 
 
 @packet_id(0x49)
-class Latency(ConstructPayload):
+class Latency(BinaryPayload):
     struct = Struct(
         latencies=GreedyRange(
             Struct(
@@ -497,14 +582,21 @@ class Latency(ConstructPayload):
         )
     )
 
+    def data(self, deserialization=False, to_impl=False):
+        data = super().data(deserialization, to_impl)
+        if deserialization:
+            for latency_details in data['latencies']:
+                latency_details['latency'] >>= 8
+        return data
+
 
 @packet_id(0x51)
-class UpdateReady(ConstructPayload):
+class UpdateReady(BinaryPayload):
     struct = Struct()
 
 
 @packet_id(0x5A)
-class ScriptList(ConstructPayload):
+class ScriptList(BinaryPayload):
     struct = Struct(
         level_challenge=Byte[4],
         script_data=Byte[5],
@@ -529,7 +621,7 @@ GameplayProtocol.register(GameState)
 GameplayProtocol.register(Heartbeat)
 GameplayProtocol.register(Latency, update_latencies=True)
 GameplayProtocol.register(LevelCycled)
-GameplayProtocol.register(NewClient, notice_players=True)
+GameplayProtocol.register(ClientDetails, notice_players=True)
 GameplayProtocol.register(Ping)
 GameplayProtocol.register(PlusAcknowledgement, latest_plus=True)
 GameplayProtocol.register(Pong)
@@ -544,3 +636,35 @@ GameplayProtocol.register(UpdateEvents)
 GameplayProtocol.register(UpdatePlayers, notice_players=True)
 GameplayProtocol.register(UpdateReady)
 GameplayProtocol.register(UpdateRequest)
+
+
+all_payloads = list(GameplayPayload.impls)
+
+
+@GameplayProtocol.handles(all_payloads, capture_packets=True)
+def capture(self, payload):
+    self.client.call_handlers('capture', payload.deserialized_from)
+
+
+@GameplayProtocol.handles(all_payloads, bot=True)
+class BotProtocol(Protocol, extends=GameplayProtocol):
+    """Packet coordination in the background using default bot behavior."""
+
+    def __init__(
+            self,
+            parent=None, *,
+            join_servers=True,
+            autospectate=True,
+            **config
+    ):
+        if parent is None:
+            raise ValueError(
+                'the bot protocol relies on running instance of the gameplay protocol'
+            )
+        super().__init__(
+            parent,
+            join_servers=join_servers,
+            autospectate=autospectate,
+            **config
+        )
+        self.client = parent.client
