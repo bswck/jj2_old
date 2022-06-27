@@ -652,7 +652,7 @@ GameplayProtocol.register(UpdateReady)
 GameplayProtocol.register(UpdateRequest)
 
 
-@GameplayProtocol.template(ALL_PAYLOADS, If.configured(bot=True))
+@GameplayProtocol.relation(ALL_PAYLOADS, If.configured(bot=True))
 class BotProtocol(Protocol, extends=GameplayProtocol):
     """Packet coordination in the background using default bot behavior."""
 

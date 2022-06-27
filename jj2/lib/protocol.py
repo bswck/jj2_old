@@ -10,7 +10,7 @@ from jj2.lib import Payload
 
 TAKES_PROVIDED_CLASS = '__takes_provided_class__'
 TAKES_PREVIOUS_VALUE_FLAG = '__takes_previous_value__'
-TEMPLATE_FLAG = '__template__'
+RELATION_FLAG = '__relation__'
 
 
 @functools.total_ordering
@@ -111,7 +111,7 @@ class Protocol:
 
     _lookup: dict
     _registry: dict
-    _templates: dict
+    _relations: dict
 
     _children: list
 
@@ -163,9 +163,16 @@ class Protocol:
         )
 
     @classmethod
-    def template(cls, payload_cls, condition=None, provide_cls=None, priority=0):
-        def _template_fn(fn):
-            cls.register_template(
+    def relation(
+            cls,
+            payload_cls,
+            condition=None,
+            provide_cls=None,
+            priority=0,
+            bidirectional=False,
+    ):
+        def _relation_fn(fn):
+            (cls.register_relation, cls.register_bidirectional_relation)[bidirectional](
                 fn,
                 payload_cls=payload_cls,
                 provide_cls=provide_cls,
@@ -174,7 +181,7 @@ class Protocol:
             )
             return fn
 
-        return _template_fn
+        return _relation_fn
 
     def handle(self, payload: Payload):
         if self._aborted:
@@ -186,8 +193,8 @@ class Protocol:
         handlers = []
 
         conditional_cases = {
-            **self._templates.get(ALL_PAYLOADS, {}),
-            **self._templates.get(type(payload), {})
+            **self._relations.get(ALL_PAYLOADS, {}),
+            **self._relations.get(type(payload), {})
         }
 
         for condition, cases in conditional_cases.items():
@@ -204,7 +211,7 @@ class Protocol:
         self.call_handlers(payload, handlers)
 
     @classmethod
-    def register_template(
+    def register_relation(
             cls,
             function,
             payload_cls,
@@ -214,16 +221,27 @@ class Protocol:
             takes_protocol=True,
     ):
         (
-            cls._templates
+            cls._relations
             .setdefault(payload_cls, {})
             .setdefault(condition or If(True), [])
             .append(dict(
                 function=function,
                 provide_cls=provide_cls,
                 priority=priority,
-                takes_protocol=takes_protocol
+                takes_protocol=takes_protocol,
             ))
         )
+
+    @classmethod
+    def register_bidirectional_relation(cls, **kwargs):
+        payload_cls = kwargs.pop('payload_cls')
+        provide_cls = kwargs.pop('provide_cls')
+        for (
+            payload_class, provide_class
+        ) in ((payload_cls, provide_cls), (provide_cls, payload_cls)):
+            kwargs['payload_cls'] = payload_class
+            kwargs['provide_cls'] = provide_class
+            cls.register_relation(**kwargs)
 
     def call_handlers(self, payload: Payload, handlers):
         value = None
@@ -258,7 +276,7 @@ class Protocol:
     def __init_subclass__(cls, extends=None):
         cls._lookup = {}
         cls._registry = {}
-        cls._templates = {}
+        cls._relations = {}
 
         cls._children = []
 
@@ -269,10 +287,10 @@ class Protocol:
 
         for name, function in inspect.getmembers(cls):
             # Avoid unsafe properties when creating Protocol subclasses!
-            template_kwargs = getattr(function, TEMPLATE_FLAG, {})
-            if template_kwargs:
-                template_kwargs['function'] = function
-                cls.register_template(**template_kwargs)
+            relation_kwargs = getattr(function, RELATION_FLAG, {})
+            if relation_kwargs:
+                relation_kwargs['function'] = function
+                cls.register_relation(**relation_kwargs)
 
 
 def takes_provided_class(fn):
@@ -285,7 +303,7 @@ def takes_previous_value(fn):
     return fn
 
 
-def template(
+def relation(
     payload_cls,
     condition=None,
     provide_cls=None,
@@ -295,7 +313,7 @@ def template(
     def _handles_decorator(fn):
         setattr(
             fn,
-            TEMPLATE_FLAG,
+            RELATION_FLAG,
             dict(
                 payload_cls=payload_cls,
                 condition=condition,
