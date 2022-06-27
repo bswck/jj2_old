@@ -103,8 +103,9 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
                 super().serialize(context)
         return self.serialize_cache
 
-    def deserialize(self, buffer, context):
+    def deserialize(self, buffer, context=None):
         super().deserialize(buffer, context)
+        context = context or {}
         impl_class = self.pick(context)
         if impl_class is None:
             impl = self
