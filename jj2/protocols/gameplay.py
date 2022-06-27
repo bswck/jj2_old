@@ -10,7 +10,7 @@ from construct import (
     Padding, possiblestringencodings
 )
 
-from jj2.lib import AbstractPayload, Protocol, If, ALL_PAYLOADS
+from jj2.lib import AbstractPayload, Protocol, If, ALL_PAYLOADS, relation
 
 MAIN_ENCODING = 'cp1250'
 possiblestringencodings[MAIN_ENCODING] = 1
@@ -417,7 +417,7 @@ class GameInit(BinaryPayload):
 @packet_id(0x14)
 class DownloadingFile(BinaryPayload):
     def _pick(self, context):
-        return self.impls.get(context.get('is_first', False))
+        return self.impls.get(context.get('is_downloading', False))
 
 
 @DownloadingFile.register(True)
@@ -673,3 +673,19 @@ class BotProtocol(Protocol, extends=GameplayProtocol):
             autospectate=autospectate,
             **config
         )
+
+
+if __name__ == '__main__':
+    players = []
+    gamemode = GameMode.CTF
+    server_details = ServerDetails(
+        client_id=len(players),
+        player_id=len(players) + 1,
+        level_file_name="battle1.j2l",
+        level_crc=1,
+        tileset_crc=1,
+        game_mode=gamemode,
+        max_score=10,
+    )
+
+    print(server_details.serialize({}))

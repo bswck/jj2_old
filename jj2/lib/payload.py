@@ -30,12 +30,14 @@ class Payload(abc.ABC):
         if self.deserialized_from:
             self.deserialize(self.deserialized_from, context)
 
-    def serialize(self, context):
+    def serialize(self, context=None):
+        context = context or {}
         if self.serialize_cache is None:
             self.serialize_cache = self._serialize(context)
         return self.serialize_cache
 
     def deserialize(self, buffer, context):
+        context = context or {}
         data = self._deserialize(buffer, context)
         self.feed(data)
         self.deserialized_from = buffer
@@ -74,7 +76,7 @@ class Payload(abc.ABC):
 
     @classmethod
     def load(cls, buffer, context=None):
-        return cls().deserialize(buffer, context or {})
+        return cls().deserialize(buffer, context)
 
 
 class AbstractPayload(Payload, abc.ABC, has_feed=False):
@@ -91,7 +93,8 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
     def _impl_data(self, deserialization=False):
         return self._data
 
-    def serialize(self, context):
+    def serialize(self, context=None):
+        context = context or {}
         if self.serialize_cache is None:
             impl = self.pick(context)
             if impl:

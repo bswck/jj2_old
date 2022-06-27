@@ -220,6 +220,8 @@ class Protocol:
             condition=None,
             takes_protocol=True,
     ):
+        if provide_cls is ALL_PAYLOADS:
+            raise ValueError('cannot establish relation to all payload types')
         (
             cls._relations
             .setdefault(payload_cls, {})
@@ -236,6 +238,7 @@ class Protocol:
     def register_bidirectional_relation(cls, **kwargs):
         payload_cls = kwargs.pop('payload_cls')
         provide_cls = kwargs.pop('provide_cls')
+
         for (
             payload_class, provide_class
         ) in ((payload_cls, provide_cls), (provide_cls, payload_cls)):
