@@ -105,6 +105,7 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
 
     def deserialize(self, buffer, context):
         super().deserialize(buffer, context)
+        context = context or {}
         impl_class = self.pick(context)
         if impl_class is None:
             impl = self
