@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import abc
 import reprlib
+import weakref
 from typing import ClassVar
 
 
 class Payload(abc.ABC):
-    feeds = None
+    feeds: str | None = None
+    _supports_protocols: weakref.WeakSet
 
     def __init__(self, **data):
         self._data = data
@@ -50,6 +52,15 @@ class Payload(abc.ABC):
     def __init_subclass__(cls, has_feed=True):
         if has_feed and cls.feeds is None:
             cls.feeds = cls.__name__
+        cls._supports_protocols = weakref.WeakSet()
+
+    @classmethod
+    def _mark(cls, protocol_cls, supported=True):
+        if supported:
+            cls._supports_protocols.add(protocol_cls)
+        else:
+            cls._supports_protocols.discard(protocol_cls)
+        return supported
 
     @reprlib.recursive_repr()
     def __repr__(self):
@@ -62,7 +73,7 @@ class Payload(abc.ABC):
         )
 
     @classmethod
-    def from_buffer(cls, buffer, context=None):
+    def load(cls, buffer, context=None):
         return cls().deserialize(buffer, context or {})
 
 

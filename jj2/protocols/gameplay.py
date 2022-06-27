@@ -6,12 +6,11 @@ import functools
 from construct import (
     Enum, PaddedString, Byte, Bytes, GreedyBytes, Struct, PascalString, this, Switch, Int,
     Optional, Pass, PrefixedArray, Short, Default, CString, GreedyRange, Int32ul, Int16ul,
-    GreedyString, Int8sb, Bitwise, BitsSwapped, Array, OneOf, If, BitStruct, Padding,
-    possiblestringencodings
+    GreedyString, Int8sb, Bitwise, BitsSwapped, Array, OneOf, If as ConstructIf, BitStruct,
+    Padding, possiblestringencodings
 )
 
-from jj2.lib import AbstractPayload, Protocol
-
+from jj2.lib import AbstractPayload, Protocol, If, ALL_PAYLOADS
 
 MAIN_ENCODING = 'cp1250'
 possiblestringencodings[MAIN_ENCODING] = 1
@@ -21,6 +20,11 @@ possiblestringencodings[MAIN_ENCODING] = 1
 class MajorVersionString(str, enum.Enum):
     v1_23 = '21  '
     v1_24 = '24  '
+
+    def as_tuple(self):
+        if self is self.v1_24:
+            return 1, 24
+        return 1, 23
 
 
 @functools.partial(Enum, Byte)
@@ -198,7 +202,7 @@ class GameplayProtocol(Protocol, asyncio.Protocol):
         self._deficit = deficit
 
         if deficit == 0:
-            payload = GameplayPayload.from_buffer(buffer=bytes(self._buffer))
+            payload = GameplayPayload.load(buffer=bytes(self._buffer))
             self.handle(payload)
             self._buffer.clear()
             if eof < length:
@@ -206,7 +210,7 @@ class GameplayProtocol(Protocol, asyncio.Protocol):
                 self.data_received(tail)
 
     def datagram_received(self, data: bytes):
-        payload = GameplayPayload.from_buffer(buffer=bytes(data), checksum=data[:2])
+        payload = GameplayPayload.load(buffer=bytes(data), checksum=data[:2])
         if payload:
             self.handle(payload)
 
@@ -264,8 +268,8 @@ class GameplayPayload(BinaryPayload):
         return Byte.build(lsb % 251) + Byte.build(msb % 251)
 
     @classmethod
-    def from_buffer(cls, buffer, checksum=None, context=None):
-        self = super().from_buffer(buffer=buffer, context=context)
+    def load(cls, buffer, checksum=None, context=None):
+        self = super().load(buffer=buffer, context=context)
         if checksum is not None:
             if self.checksum() != checksum:
                 self = None
@@ -341,10 +345,19 @@ class ClientDisconnect(BinaryPayload):
         client_id=Int8sb,
         client_version=MajorVersionString,
         include_reason=Optional(Byte),
-        reason=If(
+        reason=ConstructIf(
             this.include_reason,
             PascalString(Byte, MAIN_ENCODING)
         )
+    )
+
+
+@packet_id(0x0F)
+class JoinRequest(BinaryPayload):
+    struct = Struct(
+        udp_bind=Short,
+        client_version=MajorVersionString,
+        number_of_players_from_client=Byte
     )
 
 
@@ -609,44 +622,37 @@ class ScriptList(BinaryPayload):
     )
 
 
-GameplayProtocol.register(ChatMessage, chat=True)
-GameplayProtocol.register(ClientDisconnect, notice_players=True)
-GameplayProtocol.register(ConsoleMessage, chat=True)
-GameplayProtocol.register(DownloadingFile, download_files=True)
-GameplayProtocol.register(DownloadRequest, download_files=True)
+GameplayProtocol.register(ChatMessage, If.configured(chat=True))
+GameplayProtocol.register(ClientDetails, If.configured(notice_players=True))
+GameplayProtocol.register(ClientDisconnect, If.configured(notice_players=True))
+GameplayProtocol.register(ConsoleMessage, If.configured(chat=True))
+GameplayProtocol.register(DownloadingFile, If.configured(download_files=True))
+GameplayProtocol.register(DownloadRequest, If.configured(download_files=True))
 GameplayProtocol.register(EndOfLevel)
 GameplayProtocol.register(GameEvent)
 GameplayProtocol.register(GameInit)
 GameplayProtocol.register(GameState)
 GameplayProtocol.register(Heartbeat)
-GameplayProtocol.register(Latency, update_latencies=True)
+GameplayProtocol.register(JoinRequest)
+GameplayProtocol.register(Latency, If.configured(update_latencies=True))
 GameplayProtocol.register(LevelCycled)
-GameplayProtocol.register(ClientDetails, notice_players=True)
 GameplayProtocol.register(Ping)
-GameplayProtocol.register(PlusAcknowledgement, latest_plus=True)
+GameplayProtocol.register(PlusAcknowledgement, If.configured(latest_plus=True))
 GameplayProtocol.register(Pong)
 GameplayProtocol.register(Query)
 GameplayProtocol.register(QueryReply)
 GameplayProtocol.register(ScriptList)
 GameplayProtocol.register(ServerDetails)
 GameplayProtocol.register(ServerStopped)
-GameplayProtocol.register(Spectate, spectating=True)
-GameplayProtocol.register(SpectateRequest, spectating=True)
+GameplayProtocol.register(Spectate, If.configured(spectating=True))
+GameplayProtocol.register(SpectateRequest, If.configured(spectating=True))
 GameplayProtocol.register(UpdateEvents)
-GameplayProtocol.register(UpdatePlayers, notice_players=True)
+GameplayProtocol.register(UpdatePlayers, If.configured(notice_players=True))
 GameplayProtocol.register(UpdateReady)
 GameplayProtocol.register(UpdateRequest)
 
 
-all_payloads = list(GameplayPayload.impls)
-
-
-@GameplayProtocol.handles(all_payloads, capture_packets=True)
-def capture(self, payload):
-    self.client.call_handlers('capture', payload.deserialized_from)
-
-
-@GameplayProtocol.handles(all_payloads, bot=True)
+@GameplayProtocol.template(ALL_PAYLOADS, If.configured(bot=True))
 class BotProtocol(Protocol, extends=GameplayProtocol):
     """Packet coordination in the background using default bot behavior."""
 
@@ -667,4 +673,3 @@ class BotProtocol(Protocol, extends=GameplayProtocol):
             autospectate=autospectate,
             **config
         )
-        self.client = parent.client
