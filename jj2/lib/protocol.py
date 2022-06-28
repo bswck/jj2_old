@@ -1,23 +1,33 @@
 from __future__ import annotations
 
+import enum
 import functools
 import heapq
 import inspect
+import sys
+import traceback
 from typing import Any, ClassVar
 
 from jj2.lib import Payload
 
 
-TAKES_PROVIDED_CLASS = '__takes_provided_class__'
+TAKES_INJECTED_CLASS = '__takes_injected_class__'
 TAKES_PREVIOUS_VALUE_FLAG = '__takes_previous_value__'
-RELATION_FLAG = '__relation__'
+HANDLER_FLAG = '__handles__'
+
+
+class Priority(enum.IntEnum):
+    DAEMON = 0
+    NORMAL = 1
+    IMPORTANT = 2
+    URGENT = 3
 
 
 @functools.total_ordering
 class _PrioritizedHandler:
-    def __init__(self, function, provide_cls, priority, takes_protocol=False):
+    def __init__(self, function, response_cls, priority, takes_protocol=False):
         self.fn = function
-        self.provide_cls = provide_cls
+        self.response_cls = response_cls
         self.priority = priority
         self.takes_protocol = takes_protocol
 
@@ -28,8 +38,8 @@ class _PrioritizedHandler:
         return -self.priority == -other.priority
 
     @property
-    def takes_provided_class(self):
-        return getattr(self.fn, TAKES_PROVIDED_CLASS, self.provide_cls is not None)
+    def takes_injected_class(self):
+        return getattr(self.fn, TAKES_INJECTED_CLASS, self.response_cls is not None)
 
     @property
     def takes_previous_value(self):
@@ -40,8 +50,8 @@ class _PrioritizedHandler:
         if self.takes_protocol:
             args.append(protocol)
         args.append(payload)
-        if self.takes_provided_class:
-            args.append(self.provide_cls)
+        if self.takes_injected_class:
+            args.append(self.response_cls)
         if self.takes_previous_value:
             args.append(previous_value)
         return self.fn(*args)
@@ -152,9 +162,10 @@ class Protocol:
         if registered is None:
             return functools.partial(cls.register, condition=condition)
         if issubclass(registered, Payload):
-            if condition is None:
-                condition = If(True)
-            if condition.checks_payload:
+            checks_payload = False
+            if condition:
+                checks_payload = condition.checks_payload
+            if checks_payload:
                 raise ValueError('cannot check payload schema in protocol registry filter')
             cls._registry[registered] = condition
             return registered
@@ -163,25 +174,25 @@ class Protocol:
         )
 
     @classmethod
-    def relation(
+    def handles(
             cls,
             payload_cls,
             condition=None,
-            provide_cls=None,
-            priority=0,
+            response_cls=None,
+            priority=Priority.NORMAL,
             bidirectional=False,
     ):
-        def _relation_fn(fn):
-            (cls.register_relation, cls.register_bidirectional_relation)[bidirectional](
+        def _handles_fn(fn):
+            (cls.register_handler, cls.register_bidirectional_handler)[bidirectional](
                 fn,
                 payload_cls=payload_cls,
-                provide_cls=provide_cls,
+                response_cls=response_cls,
                 priority=priority,
                 condition=condition,
             )
             return fn
 
-        return _relation_fn
+        return _handles_fn
 
     def handle(self, payload: Payload):
         if self._aborted:
@@ -198,7 +209,10 @@ class Protocol:
         }
 
         for condition, cases in conditional_cases.items():
-            if condition.check(self, payload):
+            check = False
+            if condition:
+                check = condition.check(self, payload)
+            if check:
                 for case in cases:
                     function = case.pop('function')
                     if isinstance(function, type) and issubclass(function, Protocol):
@@ -211,40 +225,40 @@ class Protocol:
         self.call_handlers(payload, handlers)
 
     @classmethod
-    def register_relation(
+    def register_handler(
             cls,
             function,
             payload_cls,
-            provide_cls=None,
-            priority=0,
+            response_cls=None,
+            priority=Priority.NORMAL,
             condition=None,
             takes_protocol=True,
     ):
-        if provide_cls is ALL_PAYLOADS:
+        if response_cls is ALL_PAYLOADS:
             raise ValueError('cannot establish relation to all payload types')
         (
             cls._relations
             .setdefault(payload_cls, {})
-            .setdefault(condition or If(True), [])
+            .setdefault(condition, [])
             .append(dict(
                 function=function,
-                provide_cls=provide_cls,
+                response_cls=response_cls,
                 priority=priority,
                 takes_protocol=takes_protocol,
             ))
         )
 
     @classmethod
-    def register_bidirectional_relation(cls, **kwargs):
+    def register_bidirectional_handler(cls, **kwargs):
         payload_cls = kwargs.pop('payload_cls')
-        provide_cls = kwargs.pop('provide_cls')
+        response_cls = kwargs.pop('response_cls')
 
         for (
-            payload_class, provide_class
-        ) in ((payload_cls, provide_cls), (provide_cls, payload_cls)):
+            payload_class, inject_class
+        ) in ((payload_cls, response_cls), (response_cls, payload_cls)):
             kwargs['payload_cls'] = payload_class
-            kwargs['provide_cls'] = provide_class
-            cls.register_relation(**kwargs)
+            kwargs['response_cls'] = inject_class
+            cls.register_handler(**kwargs)
 
     def call_handlers(self, payload: Payload, handlers):
         value = None
@@ -267,14 +281,16 @@ class Protocol:
     def on_unknown_case(self, payload):
         return
 
-    def on_error(self, payload):
-        raise
-        #
-        # print(
-        #     f'FATAL: exception caught during handling {type(payload).__name__} payload.',
-        #     file=sys.stderr
-        # )
-        # traceback.print_exc()
+    def on_error(self, payload=None, msg=None):
+        if msg is None and payload:
+            msg = f'handling {type(payload).__name__} payload'
+        else:
+            msg = f'{type(self).__name__} running'
+        print(
+            f'FATAL: exception caught during {msg}.',
+            file=sys.stderr
+        )
+        traceback.print_exc()
 
     def __init_subclass__(cls, extends=None):
         cls._lookup = {}
@@ -290,14 +306,14 @@ class Protocol:
 
         for name, function in inspect.getmembers(cls):
             # Avoid unsafe properties when creating Protocol subclasses!
-            relation_kwargs = getattr(function, RELATION_FLAG, {})
+            relation_kwargs = getattr(function, HANDLER_FLAG, {})
             if relation_kwargs:
                 relation_kwargs['function'] = function
-                cls.register_relation(**relation_kwargs)
+                cls.register_handler(**relation_kwargs)
 
 
-def takes_provided_class(fn):
-    setattr(fn, TAKES_PROVIDED_CLASS, True)
+def takes_injected_class(fn):
+    setattr(fn, TAKES_INJECTED_CLASS, True)
     return fn
 
 
@@ -306,21 +322,21 @@ def takes_previous_value(fn):
     return fn
 
 
-def relation(
+def handles(
     payload_cls,
     condition=None,
-    provide_cls=None,
-    priority=0,
+    response=None,
+    priority=Priority.NORMAL,
     takes_protocol=True,
 ):
     def _handles_decorator(fn):
         setattr(
             fn,
-            RELATION_FLAG,
+            HANDLER_FLAG,
             dict(
                 payload_cls=payload_cls,
                 condition=condition,
-                provide_cls=provide_cls,
+                response_cls=response,
                 priority=priority,
                 takes_protocol=takes_protocol
             )

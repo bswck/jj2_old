@@ -2,21 +2,26 @@ import abc
 import asyncio
 import enum
 import functools
+import struct
+from typing import Literal
 
 from construct import (
     Enum, PaddedString, Byte, Bytes, GreedyBytes, Struct, PascalString, this, Switch, Int,
     Optional, Pass, PrefixedArray, Short, Default, CString, GreedyRange, Int32ul, Int16ul,
     GreedyString, Int8sb, Bitwise, BitsSwapped, Array, OneOf, If as ConstructIf, BitStruct,
-    Padding, possiblestringencodings
+    Padding
 )
+from construct import possiblestringencodings
 
-from jj2.lib import AbstractPayload, Protocol, If, ALL_PAYLOADS, relation
+from jj2.lib import AbstractPayload, Protocol, If, Priority, Client
+from jj2.lib import handles
+from jj2.lib import ALL_PAYLOADS
+from jj2.lib.context import Context, Item
 
 MAIN_ENCODING = 'cp1250'
 possiblestringencodings[MAIN_ENCODING] = 1
 
 
-@functools.partial(Enum, PaddedString(4, 'ascii'))
 class MajorVersionString(str, enum.Enum):
     v1_23 = '21  '
     v1_24 = '24  '
@@ -27,7 +32,6 @@ class MajorVersionString(str, enum.Enum):
         return 1, 23
 
 
-@functools.partial(Enum, Byte)
 class Character(enum.IntEnum):
     JAZZ = 0
     SPAZ = 1
@@ -35,13 +39,11 @@ class Character(enum.IntEnum):
     LORI = FROG = 3
 
 
-@functools.partial(Enum, Byte)
 class Team(enum.IntEnum):
     BLUE = 0
     RED = 1
 
 
-@functools.partial(Enum, Byte)
 class GameMode(enum.IntEnum):
     SINGLEPLAYER = 0
     COOP = 1
@@ -51,7 +53,6 @@ class GameMode(enum.IntEnum):
     CTF = 5
 
 
-@functools.partial(Enum, Byte)
 class CustomGameMode(enum.IntEnum):
     OFF = 0
     ROAST_TAG = 1
@@ -66,13 +67,18 @@ class CustomGameMode(enum.IntEnum):
     DOMINATION = 16
 
 
-@functools.partial(Enum, Byte)
+class ChatType(enum.IntEnum):
+    NORMAL = 0
+    TEAM_CHAT = 1
+    WHISPER = 2
+    ME = 3
+
+
 class GameEventType(enum.IntEnum):
     PLAYER_GOT_ROASTED = 10
     BULLET_SHOT = 16
 
 
-@functools.partial(Enum, Int8sb)
 class SpectateTarget(enum.IntEnum):
     BOTTOM_FEEDER = -6
     RING_HOLDER = -5
@@ -85,13 +91,23 @@ class SpectateTarget(enum.IntEnum):
     START_SPECTATING_3 = 34
 
 
-@functools.partial(Enum, Bytes(6))
 class PlusTimestamp(enum.Enum):
     v4_1 = 0x20, 0x01, 0x01, 0x00, 0x04, 0x00  # 2013-02-05  rerelease from 2013-02-04
     v5_7 = 0x20, 0x03, 0x00, 0x00, 0x06, 0x00  # 2020-08-16
     v5_9 = 0x20, 0x03, 0x09, 0x00, 0x05, 0x00  # 2021-05-11
 
     latest = v5_9
+
+
+MajorVersionStringEnum = Enum(PaddedString(4, 'ascii'), MajorVersionString)
+CharacterEnum = Enum(Byte, Character)
+TeamEnum = Enum(Byte, Team)
+GameModeEnum = Enum(Byte, GameMode)
+CustomGameModeEnum = Enum(Byte, CustomGameMode)
+GameEventTypeEnum = Enum(Byte, GameEventType)
+ChatTypeEnum = Enum(Byte, ChatType)
+SpectateTargetEnum = Enum(Int8sb, SpectateTarget)
+PlusTimestampEnum = Enum(Bytes(6), PlusTimestamp)
 
 
 DISCONNECT_MESSAGES = {
@@ -123,7 +139,7 @@ def player_array(*, with_client_id):
         kwds.update(client_id=Byte)
     kwds.update(
         player_id=Byte,
-        team=Team,
+        team=TeamEnum,
         char=Byte,
         fur_color=Byte[4],
         sprite_mode=Default(Byte, 17),
@@ -137,40 +153,81 @@ def player_array(*, with_client_id):
     return Struct(**kwds)
 
 
-class GameplayProtocol(Protocol, asyncio.Protocol):
+class GameProtocol(Protocol, asyncio.Protocol, asyncio.DatagramProtocol):
     def __init__(
             self,
-            parent=None, *,
+            parent=None,
+            *,
+            engine,
+            future,
+            bot=True,
             capture_packets=True,
+            is_client=True,
             chat=True,
             notice_players=True,
             download_files=True,
-            update_latencies=True,
+            passwords=True,
             spectating=True,
-            bot=True,
+            update_latencies=True,
             **config
     ):
         super().__init__(
             parent,
+            bot=bot,
             capture_packets=capture_packets,
+            is_client=is_client,
             chat=chat,
             notice_players=notice_players,
             download_files=download_files,
-            update_latencies=update_latencies,
+            passwords=passwords,
             spectating=spectating,
-            bot=bot,
+            update_latencies=update_latencies,
             **config
         )
+        self.engine = engine
+        self.context = GameContext(self)
+        self._future = future
         self._deficit = 0
         self._buffer = bytearray()
         self._tcp_transport = None
         self._udp_transport = None
+
+    @property
+    def future(self):
+        return self._future
 
     def connection_made(self, transport):
         if hasattr(transport, 'sendto'):
             self._udp_transport = transport
         else:
             self._tcp_transport = transport
+
+    def send(self, data: bytes):
+        length = len(data) + 1
+        arr = bytearray()
+        try:
+            lsb = Byte.build(length)
+        except struct.error:
+            arr.append(0)
+            lsb = Int16ul.build(length)
+        arr.append(lsb)
+        arr.extend(data)
+        return self._tcp_transport.write(arr)
+
+    def sendto(self, data: bytes):
+        return self._udp_transport.sendto(data)
+
+    def submit_all(self, *payloads):
+        for payload in payloads:
+            self.submit(payload)
+
+    def submit(self, payload):
+        ip = payload.ip.lower()
+        if ip == 'tcp':
+            self.send(payload.serialize(self.context))
+        if ip == 'udp':
+            self.sendto(payload.serialize(self.context, checksum=True))
+        return self
 
     def data_received(self, data: bytes):
         length = eof = len(data)
@@ -202,17 +259,51 @@ class GameplayProtocol(Protocol, asyncio.Protocol):
         self._deficit = deficit
 
         if deficit == 0:
-            payload = GameplayPayload.load(buffer=bytes(self._buffer))
+            payload = GamePayload.load(buffer=bytes(self._buffer))
             self.handle(payload)
             self._buffer.clear()
             if eof < length:
                 tail = data[eof:]
                 self.data_received(tail)
 
-    def datagram_received(self, data: bytes):
-        payload = GameplayPayload.load(buffer=bytes(data), checksum=data[:2])
+    def datagram_received(self, data: bytes, addr: tuple):
+        payload = GamePayload.load(buffer=bytes(data), checksum=data[:2])
         if payload:
             self.handle(payload)
+
+    def eof_received(self):
+        self.engine.dispatch(self, 'eof')
+        return False
+
+    def error_received(self, exc):
+        super().on_error(msg=f'send/receive operation of UDP ({exc})')
+
+    @classmethod
+    def register(
+            cls,
+            registered=None,
+            condition=None, *,
+            ip: Literal['tcp', 'udp'] = None
+    ):
+        if registered is None:
+            return functools.partial(cls.register, registered, condition, ip=ip)
+        if ip is None:
+            raise ValueError('ip (internet protocol) must be either TCP or UDP')
+        registered = super().register(registered, condition)
+        registered.ip = ip
+        return registered
+
+
+def _collect_values_from_struct(subcons, context):
+    result = {}
+    for subcon in subcons:
+        if context is None:
+            return result
+        value = context.get(subcon.name)
+        if isinstance(subcon, Struct):
+            value = _collect_values_from_struct(subcon.subcons, value)
+        result[subcon.name] = value
+    return result
 
 
 class BinaryPayload(AbstractPayload, abc.ABC, has_feed=False):
@@ -228,15 +319,19 @@ class BinaryPayload(AbstractPayload, abc.ABC, has_feed=False):
         del data['_io']
         return data
 
-    def __init_subclass__(cls, compile_struct=not __debug__, feeds=None):
-        if compile_struct and cls.struct is not None:
+    @classmethod
+    def from_context(cls, context):
+        return cls(**_collect_values_from_struct(cls.struct.subcons, context))
+
+    def __init_subclass__(cls, compile_structs=True, feeds=None):
+        if compile_structs and cls.struct is not None:
             cls.struct = cls.struct.compile()
         if feeds:
             cls.feeds = feeds
         super().__init_subclass__()
 
 
-class GameplayPayload(BinaryPayload):
+class GamePayload(BinaryPayload):
     struct = Struct(
         packet_id=Byte,
         buffer=GreedyBytes
@@ -249,7 +344,7 @@ class GameplayPayload(BinaryPayload):
     def _impl_data(self, deserialization=False):
         return self._data['buffer']
 
-    def serialize(self, context, checksum=False):
+    def serialize(self, context=None, checksum=False):
         if self.serialize_cache is None:
             buffer = super().serialize(context)
             if checksum:
@@ -276,20 +371,22 @@ class GameplayPayload(BinaryPayload):
         return self
 
 
-packet_id = GameplayPayload.register
+packet_id = GamePayload.register
 
 
 @packet_id(0x03)
 class Ping(BinaryPayload):
+    event = 'ping'
     struct = Struct(
         number_in_list=Byte,
         unknown_data=Byte[4],
-        client_version=MajorVersionString
+        client_version=MajorVersionStringEnum
     )
 
 
 @packet_id(0x04)
 class Pong(BinaryPayload):
+    event = 'pong'
     struct = Struct(
         number_in_list_from_ping=Byte,
         unknown_data=Byte[4],
@@ -299,6 +396,7 @@ class Pong(BinaryPayload):
 
 @packet_id(0x05)
 class Query(BinaryPayload):
+    event = 'query'
     struct = Struct(
         number_in_list=Byte
     )
@@ -306,12 +404,13 @@ class Query(BinaryPayload):
 
 @packet_id(0x06)
 class QueryReply(BinaryPayload):
+    event = 'query_reply'
     struct = Struct(
         number_in_list=Byte,
         timer_sync=Byte,
         laps_on_timer_sync=Byte,
         unknown_data_1=Byte[2],
-        client_version=MajorVersionString,
+        client_version=MajorVersionStringEnum,
         player_count=Byte,
         unknown_data_2=Byte,
         game_mode=GameMode,
@@ -323,27 +422,42 @@ class QueryReply(BinaryPayload):
 
 @packet_id(0x07)
 class GameEvent(BinaryPayload):
+    event = 'game_event'
     struct = Struct(
         udp_count=Byte,
-        event_id=GameEventType,
+        event_id=GameEventTypeEnum,
         event_data=GreedyBytes
     )
 
 
 @packet_id(0x09)
 class Heartbeat(BinaryPayload):
+    event = 'heartbeat'
     struct = Struct(
         udp_count=Byte,
         send_back=GreedyBytes,
     )
 
 
+@packet_id(0x0A)
+class Password(BinaryPayload):
+    event = 'password'
+    struct = Struct(password=PascalString(Byte, MAIN_ENCODING))
+
+
+@packet_id(0x0B)
+class PasswordCheck(BinaryPayload):
+    event = 'password_check'
+    struct = Struct(password_ok=Byte)
+
+
 @packet_id(0x0D)
 class ClientDisconnect(BinaryPayload):
+    event = 'disconnect'
     struct = Struct(
         disconnect_message=Enum(Byte, **DISCONNECT_MESSAGES),
         client_id=Int8sb,
-        client_version=MajorVersionString,
+        client_version=MajorVersionStringEnum,
         include_reason=Optional(Byte),
         reason=ConstructIf(
             this.include_reason,
@@ -354,15 +468,17 @@ class ClientDisconnect(BinaryPayload):
 
 @packet_id(0x0F)
 class JoinRequest(BinaryPayload):
+    event = 'join_request'
     struct = Struct(
-        udp_bind=Short,
-        client_version=MajorVersionString,
-        number_of_players_from_client=Byte
+        udp_bind=Default(Short, 10052),
+        client_version=Default(MajorVersionStringEnum, MajorVersionString.v1_24),
+        number_of_players_from_client=Default(Byte, 1)
     )
 
 
 @packet_id(0x10)
 class ServerDetails(BinaryPayload):
+    event = 'server_details'
     struct = Struct(
         client_id=Byte,
         player_id=Byte,
@@ -395,6 +511,7 @@ class ServerDetails(BinaryPayload):
 
 @packet_id(0x11)
 class ClientDetails(BinaryPayload):
+    event = 'client_details'
     struct = Struct(
         client_id=Byte,
         players=PrefixedArray(Byte, player_array(with_client_id=False))
@@ -403,6 +520,7 @@ class ClientDetails(BinaryPayload):
 
 @packet_id(0x12)
 class UpdatePlayers(BinaryPayload):
+    event = 'players'
     struct = Struct(
         junk=Byte,
         players=GreedyRange(player_array(with_client_id=True))
@@ -411,17 +529,21 @@ class UpdatePlayers(BinaryPayload):
 
 @packet_id(0x13)
 class GameInit(BinaryPayload):
+    event = 'game_init'
     struct = Struct()
 
 
 @packet_id(0x14)
 class DownloadingFile(BinaryPayload):
+    event = 'downloading_file'
+
     def _pick(self, context):
         return self.impls.get(context.get('is_downloading', False))
 
 
 @DownloadingFile.register(True)
 class _DownloadingFileInit(BinaryPayload):
+    event = 'downloading_file'
     struct = Struct(
         packet_count=Int32ul,
         unknown_data=Byte[4],
@@ -431,6 +553,7 @@ class _DownloadingFileInit(BinaryPayload):
 
 @DownloadingFile.register(False)
 class _DownloadingFileChunk(BinaryPayload):
+    event = 'downloading_file'
     struct = Struct(
         packet_count=Int32ul,
         file_content=GreedyBytes
@@ -439,11 +562,13 @@ class _DownloadingFileChunk(BinaryPayload):
 
 @packet_id(0x15)
 class DownloadRequest(BinaryPayload):
+    event = 'download_request'
     struct = Struct(file_name=PascalString(Byte, MAIN_ENCODING))
 
 
 @packet_id(0x16)
-class LevelCycled(BinaryPayload):
+class LevelLoad(BinaryPayload):
+    event = 'level_load'
     struct = Struct(
         level_crc=Int,
         tileset_crc=Int,
@@ -458,11 +583,13 @@ class LevelCycled(BinaryPayload):
 
 @packet_id(0x17)
 class EndOfLevel(BinaryPayload):
+    event = 'end_of_level'
     struct = Struct(unknown_data=GreedyBytes)
 
 
 @packet_id(0x18)
 class UpdateEvents(BinaryPayload):
+    event = 'update_events'
     struct = Struct(
         checksum=Optional(Short),
         counter=Optional(Short),
@@ -472,11 +599,13 @@ class UpdateEvents(BinaryPayload):
 
 @packet_id(0x19)
 class ServerStopped(BinaryPayload):  # rip
+    event = 'stopped'
     struct = Struct()
 
 
 @packet_id(0x1A)
 class UpdateRequest(BinaryPayload):
+    event = 'update_request'
     struct = Struct(
         level_challenge=Byte[4],
     )
@@ -484,15 +613,18 @@ class UpdateRequest(BinaryPayload):
 
 @packet_id(0x1B)
 class ChatMessage(BinaryPayload):
+    event = 'chat'
     struct = Struct(
         client_id=Byte,
-        is_team_chat=Byte,
+        chat_type=ChatTypeEnum,
         text=GreedyString(MAIN_ENCODING),
     )
 
 
 @packet_id(0x3F)
 class PlusAcknowledgement(BinaryPayload):
+    event = 'plus'
+    
     def _pick(self, context):
         return self.impls.get(context.get('client', False))
 
@@ -502,11 +634,13 @@ class PlusAcknowledgement(BinaryPayload):
 
 @PlusAcknowledgement.register(True)  # client-side
 class PlusRequest(BinaryPayload):
-    struct = Struct(timestamp=PlusTimestamp)
+    event = 'plus_request'
+    struct = Struct(timestamp=Default(PlusTimestampEnum, PlusTimestamp.latest))
 
 
 @PlusAcknowledgement.register(False)  # server-side
 class PlusDetails(BinaryPayload):
+    event = 'plus_details'
     struct = Struct(
         unknown=Byte,
         health_info=Byte,
@@ -522,6 +656,7 @@ class PlusDetails(BinaryPayload):
 
 @packet_id(0x40)
 class ConsoleMessage(BinaryPayload):
+    event = 'console'
     struct = Struct(
         message_type=Byte,
         text=GreedyString(MAIN_ENCODING)
@@ -530,6 +665,7 @@ class ConsoleMessage(BinaryPayload):
 
 @packet_id(0x41)
 class Spectate(BinaryPayload):
+    event = 'spectate_pkt'
     struct = Struct(
         packet_type=Byte,
         buffer=GreedyBytes
@@ -544,17 +680,19 @@ class Spectate(BinaryPayload):
 
 @Spectate.register(0)
 class _EachSpectator(BinaryPayload):
+    event = 'all_spectators'
     struct = Struct(spectators=Array(4, BitsSwapped(Bitwise(Bytes(8)))))
 
 
 @Spectate.register(1)
 class _Spectators(BinaryPayload):
+    event = 'spectators'
     struct = Struct(
         spectators=GreedyRange(
             Struct(
                 is_out=Byte,
                 client_id=Byte,
-                spectate_target=SpectateTarget
+                spectate_target=SpectateTargetEnum
             )
         )
     )
@@ -562,6 +700,7 @@ class _Spectators(BinaryPayload):
 
 @packet_id(0x42)
 class SpectateRequest(BinaryPayload):
+    event = 'spectate'
     struct = Struct(
         spectating=OneOf(Byte, (20, 21))
     )
@@ -574,6 +713,7 @@ class SpectateRequest(BinaryPayload):
 
 @packet_id(0x45)
 class GameState(BinaryPayload):
+    event = 'game_state'
     struct = Struct(
         state=BitStruct(
             pad=Padding(5),
@@ -586,6 +726,7 @@ class GameState(BinaryPayload):
 
 @packet_id(0x49)
 class Latency(BinaryPayload):
+    event = 'latencies'
     struct = Struct(
         latencies=GreedyRange(
             Struct(
@@ -605,11 +746,13 @@ class Latency(BinaryPayload):
 
 @packet_id(0x51)
 class UpdateReady(BinaryPayload):
+    event = 'ready'
     struct = Struct()
 
 
 @packet_id(0x5A)
 class ScriptList(BinaryPayload):
+    event = 'scripts'
     struct = Struct(
         level_challenge=Byte[4],
         script_data=Byte[5],
@@ -622,38 +765,45 @@ class ScriptList(BinaryPayload):
     )
 
 
-GameplayProtocol.register(ChatMessage, If.configured(chat=True))
-GameplayProtocol.register(ClientDetails, If.configured(notice_players=True))
-GameplayProtocol.register(ClientDisconnect, If.configured(notice_players=True))
-GameplayProtocol.register(ConsoleMessage, If.configured(chat=True))
-GameplayProtocol.register(DownloadingFile, If.configured(download_files=True))
-GameplayProtocol.register(DownloadRequest, If.configured(download_files=True))
-GameplayProtocol.register(EndOfLevel)
-GameplayProtocol.register(GameEvent)
-GameplayProtocol.register(GameInit)
-GameplayProtocol.register(GameState)
-GameplayProtocol.register(Heartbeat)
-GameplayProtocol.register(JoinRequest)
-GameplayProtocol.register(Latency, If.configured(update_latencies=True))
-GameplayProtocol.register(LevelCycled)
-GameplayProtocol.register(Ping)
-GameplayProtocol.register(PlusAcknowledgement, If.configured(latest_plus=True))
-GameplayProtocol.register(Pong)
-GameplayProtocol.register(Query)
-GameplayProtocol.register(QueryReply)
-GameplayProtocol.register(ScriptList)
-GameplayProtocol.register(ServerDetails)
-GameplayProtocol.register(ServerStopped)
-GameplayProtocol.register(Spectate, If.configured(spectating=True))
-GameplayProtocol.register(SpectateRequest, If.configured(spectating=True))
-GameplayProtocol.register(UpdateEvents)
-GameplayProtocol.register(UpdatePlayers, If.configured(notice_players=True))
-GameplayProtocol.register(UpdateReady)
-GameplayProtocol.register(UpdateRequest)
+GameProtocol.register(ChatMessage, If.configured(chat=True), ip='tcp')
+GameProtocol.register(ClientDetails, If.configured(notice_players=True), ip='tcp')
+GameProtocol.register(ClientDisconnect, If.configured(notice_players=True), ip='tcp')
+GameProtocol.register(ConsoleMessage, If.configured(chat=True), ip='tcp')
+GameProtocol.register(DownloadingFile, If.configured(download_files=True), ip='tcp')
+GameProtocol.register(DownloadRequest, If.configured(download_files=True), ip='tcp')
+GameProtocol.register(EndOfLevel, ip='tcp')
+GameProtocol.register(GameEvent, ip='udp')
+GameProtocol.register(GameInit, ip='tcp')
+GameProtocol.register(GameState, ip='udp')
+GameProtocol.register(Heartbeat, ip='udp')
+GameProtocol.register(JoinRequest, ip='tcp')
+GameProtocol.register(Latency, If.configured(update_latencies=True), ip='tcp')
+GameProtocol.register(LevelLoad, ip='tcp')
+GameProtocol.register(Password, If.configured(passwords=True), ip='udp')
+GameProtocol.register(PasswordCheck, If.configured(passwords=True), ip='udp')
+GameProtocol.register(Ping, ip='udp')
+GameProtocol.register(PlusAcknowledgement, If.configured(latest_plus=True), ip='tcp')
+GameProtocol.register(Pong, ip='udp')
+GameProtocol.register(Query, ip='udp')
+GameProtocol.register(QueryReply, ip='udp')
+GameProtocol.register(ScriptList, ip='tcp')
+GameProtocol.register(ServerDetails, ip='tcp')
+GameProtocol.register(ServerStopped, ip='tcp')
+GameProtocol.register(Spectate, If.configured(spectating=True), ip='tcp')
+GameProtocol.register(SpectateRequest, If.configured(spectating=True), ip='tcp')
+GameProtocol.register(UpdateEvents, ip='tcp')
+GameProtocol.register(UpdatePlayers, If.configured(notice_players=True), ip='tcp')
+GameProtocol.register(UpdateReady, ip='tcp')
+GameProtocol.register(UpdateRequest, ip='tcp')
 
 
-@GameplayProtocol.relation(ALL_PAYLOADS, If.configured(bot=True))
-class BotProtocol(Protocol, extends=GameplayProtocol):
+@GameProtocol.handles(ALL_PAYLOADS)
+def dispatch(protocol, payload):
+    protocol.engine.dispatch(protocol, payload)
+
+
+@GameProtocol.handles(ALL_PAYLOADS, If.configured(bot=True))
+class BotProtocol(Protocol, extends=GameProtocol):
     """Packet coordination in the background using default bot behavior."""
 
     def __init__(
@@ -673,19 +823,36 @@ class BotProtocol(Protocol, extends=GameplayProtocol):
             autospectate=autospectate,
             **config
         )
+        self.context = self.parent.context
+
+    @handles(ServerDetails, response=ClientDetails, priority=Priority.URGENT)
+    def on_server_details(self, payload, response):
+        self.context.update(payload.data())
+        self.parent.submit(response.from_context(self.context))
 
 
-if __name__ == '__main__':
-    players = []
-    gamemode = GameMode.CTF
-    server_details = ServerDetails(
-        client_id=len(players),
-        player_id=len(players) + 1,
-        level_file_name="battle1.j2l",
-        level_crc=1,
-        tileset_crc=1,
-        game_mode=gamemode,
-        max_score=10,
-    )
+class GameContext(Context):
+    client_id = Item()
+    players = Item()
 
-    print(server_details.serialize({}))
+
+class GameClient(Client):
+    def __init__(self, **config):
+        super().__init__(**config)
+        self.config['is_client'] = True
+
+    async def run(self, timeout=None):
+        futs = (proto.future for protos in self.protocols.values() for proto in protos)
+        await asyncio.wait(futs, timeout=timeout)
+
+    async def connect(self, host, port=10052):
+        protocol = GameProtocol(engine=self, future=self.loop.create_future(), **self.config)
+        await self.loop.create_connection(lambda: protocol, host=host, port=port)
+        await self.loop.create_datagram_endpoint(lambda: protocol, remote_addr=(host, port))
+        return protocol
+
+    async def join(self, protocol):
+        protocol.submit_all(
+            JoinRequest(), 
+            PlusRequest(), 
+        )

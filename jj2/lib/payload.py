@@ -7,6 +7,7 @@ from typing import ClassVar
 
 
 class Payload(abc.ABC):
+    event: str | None = None
     feeds: str | None = None
     _supports_protocols: weakref.WeakSet
 
@@ -78,6 +79,10 @@ class Payload(abc.ABC):
     def load(cls, buffer, context=None):
         return cls().deserialize(buffer, context)
 
+    @classmethod
+    def from_context(cls, context):
+        return cls(**context)
+
 
 class AbstractPayload(Payload, abc.ABC, has_feed=False):
     impls: ClassVar[dict]
@@ -130,10 +135,11 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
     def __init_subclass__(cls, has_feed=True):
         super().__init_subclass__(has_feed=has_feed)
         cls.impls = {}
+        cls.labels = {}
 
     @classmethod
-    def register(cls, condition):
+    def register(cls, value):
         def _register_impl(payload_cls):
-            cls.impls[condition] = payload_cls
+            cls.impls[value] = payload_cls
             return payload_cls
         return _register_impl
