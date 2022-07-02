@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 import reprlib
 import weakref
-from typing import ClassVar
+from typing import ClassVar, Any
 
 
 class Payload(abc.ABC):
@@ -13,14 +13,14 @@ class Payload(abc.ABC):
 
     def __init__(self, **data):
         self._data = data
-        self.serialize_cache = None
+        self.serialized = None
         self.deserialized_from = None
 
     def data(self, deserialization=False):
         return self._data
 
     def on_data_update(self):
-        self.serialize_cache = None
+        self.serialized = None
         self.deserialized_from = None
 
     def feed(self, changes):
@@ -31,39 +31,55 @@ class Payload(abc.ABC):
         if self.deserialized_from:
             self.deserialize(self.deserialized_from, context)
 
-    def serialize(self, context=None):
+    def serialize(self, context=None, **kwargs):
         context = context or {}
-        if self.serialize_cache is None:
-            self.serialize_cache = self._serialize(context)
-        return self.serialize_cache
+        if self.serialized is None:
+            self.serialized = self._serialize(context)
+        return self.serialized
 
-    def deserialize(self, buffer, context):
+    def deserialize(self, serialized, context, **kwargs):
         context = context or {}
-        data = self._deserialize(buffer, context)
-        self.feed(data)
-        self.deserialized_from = buffer
+        data = self._deserialize(serialized, context, **kwargs)
+        if data is not None:
+            self.feed(data)
+            self.deserialized_from = serialized
         return self
 
+    @classmethod
+    def load(cls, serialized, context=None, **options):
+        return cls().deserialize(
+            serialized=serialized,
+            context=context,
+            **options
+        )
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**data)
+
+    @classmethod
+    def on_register(cls, protocol_cls=None, payload_cls=None, protocol_supported=True):
+        if payload_cls:
+            cls._supports_protocols = payload_cls._supports_protocols
+        if protocol_cls:
+            if protocol_supported:
+                cls._supports_protocols.add(protocol_cls)
+            else:
+                cls._supports_protocols.discard(protocol_cls)
+        return protocol_supported
+
     @abc.abstractmethod
-    def _serialize(self, context):
+    def _serialize(self, context, **kwargs):
         pass
 
     @abc.abstractmethod
-    def _deserialize(self, buffer, context):
+    def _deserialize(self, serialized, context, **kwargs):
         pass
 
     def __init_subclass__(cls, has_feed=True):
         if has_feed and cls.feeds is None:
             cls.feeds = cls.__name__
         cls._supports_protocols = weakref.WeakSet()
-
-    @classmethod
-    def _mark(cls, protocol_cls, supported=True):
-        if supported:
-            cls._supports_protocols.add(protocol_cls)
-        else:
-            cls._supports_protocols.discard(protocol_cls)
-        return supported
 
     @reprlib.recursive_repr()
     def __repr__(self):
@@ -72,25 +88,18 @@ class Payload(abc.ABC):
             type(self).__name__
             + ((
                 '(' + ', '.join(f'{key!s}={value!r}' for key, value in data.items()) + ')'
-            ) if data else '')
+            ) if data else '()')
         )
-
-    @classmethod
-    def load(cls, buffer, context=None):
-        return cls().deserialize(buffer, context)
-
-    @classmethod
-    def from_context(cls, context):
-        return cls(**context)
 
 
 class AbstractPayload(Payload, abc.ABC, has_feed=False):
     impls: ClassVar[dict]
+    impl_spec: tuple[type[Payload], Any]
     feeds = None
     has_default_implementation = None
     impl_feeder = True
 
-    def data(self, deserialization=False, to_impl=False):
+    def data(self, deserialization=True, to_impl=False):
         if to_impl:
             return self._impl_data()
         return super().data(deserialization=deserialization)
@@ -98,48 +107,66 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
     def _impl_data(self, deserialization=False):
         return self._data
 
-    def serialize(self, context=None):
+    def serialize(
+            self,
+            context=None,
+            standalone=False,
+            **kwargs
+    ):
         context = context or {}
-        if self.serialize_cache is None:
-            impl = self.pick(context)
-            if impl:
-                self.serialize_cache = impl(**self.data(to_impl=True)).serialize(context)
-            else:
-                super().serialize(context)
-        return self.serialize_cache
+        implements_cls = impl_key = None
+        impl_spec = getattr(self, 'impl_spec', None)
+        if not standalone and impl_spec and self.impl_feeder:
+            implements_cls, impl_key = impl_spec
+        self.serialized = super().serialize(context)
+        if implements_cls:
+            implements = implements_cls.from_dict({self.feeds: self.serialized})
+            implements._set_impl_key(impl_key, context)
+            serialized = implements.serialize(**kwargs, context=context)
+            return serialized
+        return self.serialized
 
-    def deserialize(self, buffer, context=None):
-        super().deserialize(buffer, context)
+    def deserialize(self, serialized, context=None, **kwargs):
+        super().deserialize(serialized, context)
         context = context or {}
         impl_class = self.pick(context)
         if impl_class is None:
             impl = self
         else:
-            impl = impl_class().deserialize(self.data(deserialization=True, to_impl=True), context)
+            impl = impl_class().deserialize(
+                serialized=self.data(deserialization=True, to_impl=True),
+                context=context,
+                **kwargs
+            )
             if self.impl_feeder:
                 self.feed({impl.feeds: impl.deserialized_from})
         return impl
 
     def pick(self, context):
-        impl = self._pick(context)
+        impl = self.impls.get(self._get_impl_key(context))
         if impl is None and not self.has_default_implementation:
             raise NotImplementedError(
-                f'not implemented for {self.feeds or "(no payload feeds))"!r} '
+                f'not implemented for {self.feeds or "(no payload feeds field))"!r} '
                 f'(context: {context})'
             )
         return impl
 
-    def _pick(self, context) -> type[Payload] | None:
+    def _get_impl_key(self, context) -> type[Payload] | None:
+        return
+
+    def _set_impl_key(self, key, context):
         return
 
     def __init_subclass__(cls, has_feed=True):
         super().__init_subclass__(has_feed=has_feed)
         cls.impls = {}
-        cls.labels = {}
 
     @classmethod
     def register(cls, value):
         def _register_impl(payload_cls):
             cls.impls[value] = payload_cls
+            payload_cls.impl_spec = (cls, value)
+            payload_cls.on_register(payload_cls=cls)
             return payload_cls
         return _register_impl
+

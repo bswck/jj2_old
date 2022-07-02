@@ -61,16 +61,21 @@ class Engine(abc.ABC):
         self.config = config
         self.protocols = {}
         self.runner = LoopRunner(self.run)
+        self._setup_fn = None
 
     @property
     def loop(self):
         return self.runner.loop
 
     def start(self, *args, **kwargs):
-        self.runner.run(self.run(*args, **kwargs))
+        self.runner.run(*args, **kwargs)
 
     def shutdown(self):
         self.runner.shutdown()
+
+    def setup(self, fn):
+        self._setup_fn = fn
+        return fn
 
     def dispatch(self, protocol, event: str, payload=None):
         dispatch = self.get_dispatcher(event)
@@ -87,9 +92,13 @@ class Engine(abc.ABC):
         handlers = self._handlers.get(event, [])
         return asyncio.gather(*(handler(self, *args, **kwargs) for handler in handlers))
 
-    @abc.abstractmethod
+    def register_protocol(self, key, protocol):
+        self.protocols.setdefault(key, []).append(protocol)
+        return protocol
+
     async def run(self, *args, **kwargs):
-        pass
+        if callable(self._setup_fn):
+            await self._setup_fn()
 
     @classmethod
     def on(cls, event, condition, fn, override=False):
