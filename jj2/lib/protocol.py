@@ -8,8 +8,6 @@ import sys
 import traceback
 from typing import Any, ClassVar
 
-from construct import ConstructError
-
 from jj2.lib import Payload
 
 
@@ -26,7 +24,7 @@ class Priority(enum.IntEnum):
 
 
 @functools.total_ordering
-class _PrioritizedHandler:
+class HandlerWithPriority:
     def __init__(self, function, response_cls, priority, takes_protocol=False):
         self.fn = function
         self.response_cls = response_cls
@@ -41,7 +39,9 @@ class _PrioritizedHandler:
 
     @property
     def takes_response_class(self):
-        return getattr(self.fn, TAKES_RESPONSE_CLASS, self.response_cls is not None)
+        return getattr(
+            self.fn, TAKES_RESPONSE_CLASS, self.response_cls is not None
+        )
 
     @property
     def takes_previous_value(self):
@@ -109,12 +109,18 @@ class If:
 
     def __and__(self, other):
         return type(self)(
-            lambda proto, payload: self.check(proto, payload) and other.check(proto, payload)
+            lambda proto, payload: (
+                self.check(proto, payload)
+                and other.check(proto, payload)
+            )
         )
 
     def __or__(self, other):
         return type(self)(
-            lambda proto, payload: self.check(proto, payload) or other.check(proto, payload)
+            lambda proto, payload: (
+                self.check(proto, payload)
+                or other.check(proto, payload)
+            )
         )
 
 
@@ -152,9 +158,15 @@ class Protocol:
                 check = condition.check(self, None)
 
             if check:
-                payload_cls.on_register(protocol_cls=self, protocol_supported=True)
+                payload_cls.on_register(
+                    protocol_cls=self,
+                    protocol_supported=True
+                )
             else:
-                payload_cls.on_register(protocol_cls=self, protocol_supported=False)
+                payload_cls.on_register(
+                    protocol_cls=self,
+                    protocol_supported=False
+                )
                 if abort_on_check_failure:
                     self._aborted = True
                     break
@@ -174,11 +186,14 @@ class Protocol:
             if condition:
                 checks_payload = condition.checks_payload
             if checks_payload:
-                raise ValueError('cannot check payload schema in protocol registry filter')
+                raise ValueError(
+                    'cannot check payload schema in protocol registry filter'
+                )
             cls._registry[registered] = condition
             return registered
         raise TypeError(
-            'invalid registrar type: expected Payload subclass as a Protocol registrar'
+            'invalid registrar type: expected Payload subclass '
+            'as a Protocol registrar'
         )
 
     @classmethod
@@ -191,7 +206,12 @@ class Protocol:
             bidirectional: bool = False,
     ):
         def _handles_fn(fn):
-            (cls.register_handler, cls.register_bidirectional_handler)[bidirectional](
+            register = (
+                cls.register_handler,
+                cls.register_bidirectional_handler
+            )[bidirectional]
+
+            register(
                 fn,
                 payload_cls=payload_cls,
                 response_cls=response_cls,
@@ -204,8 +224,9 @@ class Protocol:
 
     def handle_data(self, serialized, context=None, **options):
         try:
-            options.setdefault('length', len(serialized))
-            payload = self.payload_cls.load(serialized, context=context, **options)
+            payload = self.payload_cls.load(
+                serialized, context=context, **options
+            )
         except NotImplementedError:
             payload = None
 
@@ -233,11 +254,14 @@ class Protocol:
                 if check:
                     for case in cases:
                         function = case.pop('function')
-                        if isinstance(function, type) and issubclass(function, Protocol):
+                        if (
+                            isinstance(function, type)
+                            and issubclass(function, Protocol)
+                        ):
                             function = self.children[function].handle
                             case['takes_protocol'] = False
                         case['function'] = function
-                        handler = _PrioritizedHandler(**case)
+                        handler = HandlerWithPriority(**case)
                         heapq.heappush(handlers, handler)
 
         self.call_handlers(payload, handlers)
@@ -306,7 +330,7 @@ class Protocol:
         return new_value
 
     def on_unknown_case(self, payload):
-        pass
+        return
 
     def on_error(self, payload=None, msg=None):
         if msg is None and payload:

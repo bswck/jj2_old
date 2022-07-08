@@ -58,7 +58,9 @@ class Payload(abc.ABC):
         return cls(**data)
 
     @classmethod
-    def on_register(cls, protocol_cls=None, payload_cls=None, protocol_supported=True):
+    def on_register(
+            cls, protocol_cls=None, payload_cls=None, protocol_supported=True
+    ):
         if payload_cls:
             cls._supports_protocols = payload_cls._supports_protocols
         if protocol_cls:
@@ -76,20 +78,18 @@ class Payload(abc.ABC):
     def _deserialize(self, serialized, context, **kwargs):
         pass
 
-    def __init_subclass__(cls, has_feed=True):
-        if has_feed and cls.feeds is None:
+    def __init_subclass__(cls, feeds=True):
+        if feeds and cls.feeds is None:
             cls.feeds = cls.__name__
         cls._supports_protocols = weakref.WeakSet()
 
     @reprlib.recursive_repr()
     def __repr__(self):
         data = self.data()
-        return (
-            type(self).__name__
-            + ((
-                '(' + ', '.join(f'{key!s}={value!r}' for key, value in data.items()) + ')'
-            ) if data else '()')
-        )
+        return type(self).__name__ + ', '.join(
+            f'{key!s}={value!r}'
+            for key, value in data.items()
+        ).join('()')
 
 
 class AbstractPayload(Payload, abc.ABC, has_feed=False):
@@ -120,7 +120,9 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
             implements_cls, impl_key = impl_spec
         self.serialized = super().serialize(context)
         if implements_cls:
-            implements = implements_cls.from_dict({self.feeds: self.serialized})
+            implements = implements_cls.from_dict(
+                {self.feeds: self.serialized}
+            )
             implements._set_impl_key(impl_key, context)
             serialized = implements.serialize(**kwargs, context=context)
             return serialized
@@ -146,7 +148,8 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
         impl = self.impls.get(self._get_impl_key(context))
         if impl is None and not self.has_default_implementation:
             raise NotImplementedError(
-                f'not implemented for {self.feeds or "(no payload feeds field))"!r} '
+                'not implemented for '
+                f'{self.feeds or "(no payload feeds field))"!r} '
                 f'(context: {context})'
             )
         return impl
@@ -157,8 +160,8 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
     def _set_impl_key(self, key, context):
         return
 
-    def __init_subclass__(cls, has_feed=True):
-        super().__init_subclass__(has_feed=has_feed)
+    def __init_subclass__(cls, feeds=True):
+        super().__init_subclass__(feeds=feeds)
         cls.impls = {}
 
     @classmethod
@@ -169,4 +172,3 @@ class AbstractPayload(Payload, abc.ABC, has_feed=False):
             payload_cls.on_register(payload_cls=cls)
             return payload_cls
         return _register_impl
-

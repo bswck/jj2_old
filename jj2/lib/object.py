@@ -35,7 +35,9 @@ class Object(UserDict, dict):
     def initialize_properties(self):
         for name, prop in inspect.getmembers(type(self)):
             try:
-                object_property = object.__getattribute__(prop, OBJECT_PROPERTY_FLAG)
+                object_property = object.__getattribute__(
+                    prop, OBJECT_PROPERTY_FLAG
+                )
             except AttributeError:
                 object_property = None
             if object_property:
@@ -124,7 +126,10 @@ class Property:
         if self.owner is None:
             self.owner = owner
         if owner is not self.owner:
-            raise ValueError(f'{type(self).__name__!r} object linked to more than 1 context class')
+            raise ValueError(
+                f'{type(self).__name__!r} object linked to more than '
+                f'1 context class'
+            )
 
     def _call_on_get(self, instance, value):
         if not callable(self._on_get):
@@ -181,7 +186,9 @@ class _AttributeChain:
         return self
 
     def resolve(self, instance, owner):
-        return functools.reduce(getattr, self.chain, self.property.__get__(instance, owner))
+        return functools.reduce(
+            getattr, self.chain, self.property.__get__(instance, owner)
+        )
 
     def __repr__(self):
         return f'{self.property.key}.{".".join(self.chain)}'
@@ -222,5 +229,8 @@ class Lazy:
 
     def __set__(self, instance, value):
         if self.read_only:
-            raise ValueError(f'{self.chain} pointed from {type(instance).__name__} is read-only')
+            raise ValueError(
+                f'{self.chain} pointed from '
+                f'{type(instance).__name__} is read-only'
+            )
         self.chain.property.__set__(instance, value)

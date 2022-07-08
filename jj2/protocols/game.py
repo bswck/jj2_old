@@ -6,14 +6,46 @@ import random
 from typing import Literal
 
 from construct import (
-    Enum, Byte, Bytes, GreedyBytes, Struct, PascalString, this, Switch, Int,
-    Optional, Pass, PrefixedArray, Short, Default, CString, GreedyRange, Int32ul, Int16ul,
-    GreedyString, Int8sb, Bitwise, BitsSwapped, Array, If as ConstructIf, BitStruct,
-    Padding, Flag, Renamed, ConstructError, IfThenElse, PaddedString
+    Byte,
+    Bytes,
+    GreedyBytes,
+    Struct,
+    PascalString,
+    this,
+    Switch,
+    Int,
+    Optional,
+    Pass,
+    PrefixedArray,
+    Short,
+    Default,
+    CString,
+    GreedyRange,
+    Int32ul,
+    Int16ul,
+    GreedyString,
+    Int8sb,
+    Bitwise,
+    BitsSwapped,
+    Array,
+    If as ConstructIf,
+    BitStruct,
+    Padding,
+    Flag,
+    Renamed,
 )
 from construct import possiblestringencodings
 
-from jj2.lib import AbstractPayload, Protocol, If, Priority, Client, Object, Property, Lazy
+from jj2.lib import (
+    AbstractPayload,
+    Protocol,
+    If,
+    Priority,
+    Client,
+    Object,
+    Property,
+    Lazy,
+)
 from jj2.lib import handles, unformat_jj2_string
 from jj2.lib import ALL_PAYLOADS
 
@@ -60,7 +92,7 @@ class Session(Object):
     udp_source_port = Property(0)
     client_id = Property()
     from_server = Property(True)
-    client_details_sent = Property(False)
+    introduced = Property(False)
 
     players = Property([], collection=True)
 
@@ -157,22 +189,17 @@ class Fur:
                 self.body_colour,
                 self.stirnband_colour,
                 self.blaster_colour,
-                self.wristband_colour
+                self.wristband_colour,
             )
         if character == CHARACTER.SPAZ:
             return (
                 self.blaster_colour,
                 self.body_1_colour,
                 self.shoes_and_wristband_colour,
-                self.body_2_colour
+                self.body_2_colour,
             )
         if character in (CHARACTER.LORI, CHARACTER.FROG):
-            return (
-                0,
-                self.blaster_1_colour,
-                self.blaster_2_colour,
-                self.body_colour
-            )
+            return 0, self.blaster_1_colour, self.blaster_2_colour, self.body_colour
         return 16, 24, 32, 40
 
     @classmethod
@@ -186,18 +213,12 @@ class Fur:
             shoes_and_wristband_colour=colour_3,
             body_2_colour=colour_4,
             blaster_1_colour=colour_2,
-            blaster_2_colour=colour_3
+            blaster_2_colour=colour_3,
         )
 
 
 class Rabbit:
-    def __init__(
-            self,
-            name=None,
-            team=TEAM.BLUE,
-            character=CHARACTER.JAZZ,
-            fur=Fur()
-    ):
+    def __init__(self, name=None, team=TEAM.BLUE, character=CHARACTER.JAZZ, fur=Fur()):
         self._name = None
         self._name_unformatted = None
         self.team = team
@@ -348,8 +369,7 @@ class Player(Object):
     y_org = Property(0.0)
     y_pos = Property(0.0)
     y_speed = Property(0.0)
-    
-    
+
     def to_payload_data(self, payload_cls):
         if payload_cls is ClientDetails:
             return dict(
@@ -359,19 +379,19 @@ class Player(Object):
                 fur_colour=self.fur_colour,
                 sprite_mode_param=10,
                 unused=124,
-                rabbit_name=self.rabbit_name
+                rabbit_name=self.rabbit_name,
             )
         return self
 
 
-MAIN_ENCODING = 'cp1250'
+MAIN_ENCODING = "cp1250"
 possiblestringencodings[MAIN_ENCODING] = 1
 
 
 def _cast_to_data(payload_cls, obj):
     if isinstance(obj, (tuple, list)):
         obj = type(obj)(map(functools.partial(_cast_to_data, payload_cls), obj))
-    elif hasattr(obj, 'to_payload_data'):
+    elif hasattr(obj, "to_payload_data"):
         obj = obj.to_payload_data(payload_cls)
     return obj
 
@@ -383,7 +403,8 @@ def _collect_by_struct(payload_cls, subcons, data):
     for subcon in subcons:
         value = _cast_to_data(payload_cls, data.get(subcon.name))
         if (
-            value is None and isinstance(subcon, Default)
+            value is None
+            and isinstance(subcon, Default)
             or (isinstance(subcon, Renamed) and isinstance(subcon.subcon, Default))
         ):
             continue
@@ -394,7 +415,7 @@ def _collect_by_struct(payload_cls, subcons, data):
 
 
 def _struct_parsed(container, _):
-    container.pop('_io', None)
+    container.pop("_io", None)
 
 
 def struct(*args, **kwargs):
@@ -405,20 +426,20 @@ def struct(*args, **kwargs):
 
 class BinaryPayload(AbstractPayload, abc.ABC, has_feed=False):
     struct = struct(buffer=GreedyBytes)
-    feeds = 'buffer'
+    feeds = "buffer"
     has_default_implementation = True
 
     def _serialize(self, context, **kwargs):
         try:
             return self.struct.build(self.data(deserialization=False), **kwargs)
         except Exception as exc:
-            raise PayloadException(self.event or 'unknown event') from exc
+            raise PayloadException(self.event or "unknown event") from exc
 
     def _deserialize(self, serialized, context, **kwargs):
         try:
             return self.struct.parse(serialized, **kwargs)
         except Exception as exc:
-            raise PayloadException(self.event or 'unknown event') from exc
+            raise PayloadException(self.event or "unknown event") from exc
 
     @classmethod
     def from_dict(cls, data):
@@ -433,20 +454,17 @@ class BinaryPayload(AbstractPayload, abc.ABC, has_feed=False):
 
 
 class GamePayload(BinaryPayload):
-    struct = struct(
-        packet_id=Byte,
-        buffer=GreedyBytes
-    )
+    struct = struct(packet_id=Byte, buffer=GreedyBytes)
     has_default_implementation = False
 
     def _get_impl_key(self, context):
-        return self._data['packet_id']
+        return self._data["packet_id"]
 
     def _set_impl_key(self, key, context):
-        self._data['packet_id'] = key
+        self._data["packet_id"] = key
 
     def _impl_data(self, deserialization=False):
-        return self._data['buffer']
+        return self._data["buffer"]
 
     def serialize(self, context=None, checksum=False, **kwargs) -> bytes:
         if self.serialized is None:
@@ -480,35 +498,27 @@ packet_id = GamePayload.register
 
 @packet_id(0x03)
 class Ping(BinaryPayload):
-    event = 'ping'
-    struct = struct(
-        number_in_list=Byte,
-        unknown_data=Byte[4],
-        client_version=Byte[4]
-    )
+    event = "ping"
+    struct = struct(number_in_list=Byte, unknown_data=Byte[4], client_version=Byte[4])
 
 
 @packet_id(0x04)
 class Pong(BinaryPayload):
-    event = 'pong'
+    event = "pong"
     struct = struct(
-        number_in_list_from_ping=Byte,
-        unknown_data=Byte[4],
-        game_mode_etc=Byte
+        number_in_list_from_ping=Byte, unknown_data=Byte[4], game_mode_etc=Byte
     )
 
 
 @packet_id(0x05)
 class Query(BinaryPayload):
-    event = 'query'
-    struct = struct(
-        number_in_list=Byte
-    )
+    event = "query"
+    struct = struct(number_in_list=Byte)
 
 
 @packet_id(0x06)
 class QueryReply(BinaryPayload):
-    event = 'query_reply'
+    event = "query_reply"
     struct = struct(
         number_in_list=Byte,
         timer_sync=Byte,
@@ -520,53 +530,46 @@ class QueryReply(BinaryPayload):
         game_mode=BIN_GAMEMODE,
         player_limit=Byte,
         server_name=PascalString(Byte, MAIN_ENCODING),
-        unknown_data_3=Byte
+        unknown_data_3=Byte,
     )
 
 
 @packet_id(0x07)
 class GameEvent(BinaryPayload):
-    event = 'game_event'
-    struct = struct(
-        udp_count=Byte,
-        event_id=BIN_GAMEEVENT,
-        event_data=GreedyBytes
-    )
+    event = "game_event"
+    struct = struct(udp_count=Byte, event_id=BIN_GAMEEVENT, event_data=GreedyBytes)
 
 
 @packet_id(0x09)
 class Heartbeat(BinaryPayload):
-    event = 'heartbeat'
+    event = "heartbeat"
     struct = struct(
         heartbeat_latency=Byte,
-        heartbeat_cookie=Default(GreedyBytes, b''),
+        heartbeat_cookie=Default(GreedyBytes, b""),
     )
 
 
 # @packet_id(0x0A)
 class Password(BinaryPayload):
-    event = 'password'
+    event = "password"
     struct = struct(password=PascalString(Byte, MAIN_ENCODING))
 
 
 # @packet_id(0x0B)
 class PasswordCheck(BinaryPayload):
-    event = 'password_check'
+    event = "password_check"
     struct = struct(password_ok=Byte)
 
 
 @packet_id(0x0D)
 class ClientDisconnect(BinaryPayload):
-    event = 'disconnect'
+    event = "disconnect"
     struct = struct(
         disconnect_message=BIN_DISCONNECTMESSAGE,
         client_id=Int8sb,
         client_version=BIN_VERSIONSTRING,
         include_reason=Optional(Flag),
-        reason=ConstructIf(
-            this.include_reason,
-            PascalString(Byte, MAIN_ENCODING)
-        )
+        reason=ConstructIf(this.include_reason, PascalString(Byte, MAIN_ENCODING)),
     )
 
 
@@ -585,33 +588,32 @@ def player_array(*, client_id):
         light_size=Default(Byte, 0),
         antigrav_and_nofire=Default(Byte, 0),
         unused=Default(Byte, 0),
-        rabbit_name=CString(MAIN_ENCODING)
+        rabbit_name=CString(MAIN_ENCODING),
     )
     return struct(**subcons)
 
 
 @packet_id(0x0E)
 class ClientDetails(BinaryPayload):
-    event = 'client_details'
+    event = "client_details"
     struct = struct(
-        client_id=Byte,
-        local_players=PrefixedArray(Byte, player_array(client_id=False))
+        client_id=Byte, local_players=PrefixedArray(Byte, player_array(client_id=False))
     )
 
 
 @packet_id(0x0F)
 class JoinRequest(BinaryPayload):
-    event = 'join_request'
+    event = "join_request"
     struct = struct(
         udp_source_port=Int16ul,
         client_version=BIN_VERSIONSTRING,
-        number_of_local_players=Byte
+        number_of_local_players=Byte,
     )
 
 
 @packet_id(0x10)
 class ServerDetails(BinaryPayload):
-    event = 'server_details'
+    event = "server_details"
     struct = struct(
         client_id=Byte,
         unknown=Byte,
@@ -625,74 +627,81 @@ class ServerDetails(BinaryPayload):
                 level_challenge=Byte[4],
                 heartbeat_cookie=Byte[4],
                 plus_version=Short[2],
-                music_crc=Switch(Byte, dict(enumerate([Pass, PrefixedArray(Byte, Byte)]))),
+                music_crc=Switch(
+                    Byte, dict(enumerate([Pass, PrefixedArray(Byte, Byte)]))
+                ),
                 scripts=Switch(
-                    Byte, dict(map(tuple, enumerate([
-                        Pass,
-                        struct(script_crc=Byte[4]),
-                        struct(
-                            number_of_script_files=Byte,
-                            number_of_required_files=Byte,
-                            number_of_optional_files=Byte
+                    Byte,
+                    dict(
+                        map(
+                            tuple,
+                            enumerate(
+                                [
+                                    Pass,
+                                    struct(script_crc=Byte[4]),
+                                    struct(
+                                        number_of_script_files=Byte,
+                                        number_of_required_files=Byte,
+                                        number_of_optional_files=Byte,
+                                    ),
+                                ]
+                            ),
                         )
-                    ])))
-                )
+                    ),
+                ),
             )
-        )
+        ),
     )
 
 
 @packet_id(0x12)
 class PlayerList(BinaryPayload):
-    event = 'player_list'
+    event = "player_list"
     struct = struct(
         number_of_players=Byte,  # byte unsure, omit it
-        players=GreedyRange(player_array(client_id=True))
+        players=GreedyRange(player_array(client_id=True)),
     )
 
 
 @packet_id(0x13)
 class GameInit(BinaryPayload):
-    event = 'game_init'
+    event = "game_init"
     struct = struct()
 
 
 @packet_id(0x14)
 class DownloadingFile(BinaryPayload):
-    event = 'downloading_file'
+    event = "downloading_file"
 
     def _get_impl_key(self, context):
-        return context.get('is_downloading', False)
+        return context.get("is_downloading", False)
 
 
 @DownloadingFile.register(False)
 class _DownloadingFileInit(BinaryPayload):
-    event = 'downloading_file'
+    event = "downloading_file"
     struct = struct(
         packet_count=Int32ul,
         unknown_data=Byte[4],
-        file_name=PascalString(Byte, MAIN_ENCODING)
+        file_name=PascalString(Byte, MAIN_ENCODING),
     )
 
 
 @DownloadingFile.register(True)
 class _DownloadingFileChunk(BinaryPayload):
-    event = 'downloading_file'
-    struct = struct(
-        packet_count=Int32ul,
-        file_content=GreedyBytes
-    )
+    event = "downloading_file"
+    struct = struct(packet_count=Int32ul, file_content=GreedyBytes)
 
 
 @packet_id(0x15)
 class DownloadRequest(BinaryPayload):
-    event = 'download_request'
+    event = "download_request"
     struct = struct(file_name=PascalString(Byte, MAIN_ENCODING))
 
 
 @packet_id(0x16)
 class LevelLoad(BinaryPayload):
-    event = 'level_load'
+    event = "level_load"
     struct = struct(
         level_crc=Int,
         tileset_crc=Int,
@@ -701,35 +710,35 @@ class LevelLoad(BinaryPayload):
         is_different=Flag,
         music=Byte,
         music_crc=Byte[4],
-        script_data=Optional(Byte[5])
+        script_data=Optional(Byte[5]),
     )
 
 
 @packet_id(0x17)
 class EndOfLevel(BinaryPayload):
-    event = 'end_of_level'
+    event = "end_of_level"
     struct = struct(unknown_data=GreedyBytes)
 
 
 @packet_id(0x18)
 class UpdateEvents(BinaryPayload):
-    event = 'update_events'
+    event = "update_events"
     struct = struct(
         checksum=Optional(Short),
         counter=Optional(Short),
-        unknown_data=Optional(GreedyString(MAIN_ENCODING))
+        unknown_data=Optional(GreedyString(MAIN_ENCODING)),
     )
 
 
 @packet_id(0x19)
 class ServerStopped(BinaryPayload):  # rip
-    event = 'stopped'
+    event = "stopped"
     struct = struct()
 
 
 @packet_id(0x1A)
 class UpdateRequest(BinaryPayload):
-    event = 'update_request'
+    event = "update_request"
     struct = struct(
         level_challenge=Byte[4],
     )
@@ -737,7 +746,7 @@ class UpdateRequest(BinaryPayload):
 
 @packet_id(0x1B)
 class ChatMessage(BinaryPayload):
-    event = 'chat'
+    event = "chat"
     struct = struct(
         client_id=Byte,
         chat_type=BIN_CHAT,
@@ -747,24 +756,24 @@ class ChatMessage(BinaryPayload):
 
 @packet_id(0x3F)
 class PlusAcknowledgement(BinaryPayload):
-    event = 'plus'
+    event = "plus"
 
     def _get_impl_key(self, context):
-        return context.get('from_server', True)
+        return context.get("from_server", True)
 
     def _impl_data(self, deserialization=False):
-        return self._data['buffer']
+        return self._data["buffer"]
 
 
 @PlusAcknowledgement.register(False)  # client-side
 class PlusRequest(BinaryPayload):
-    event = 'plus_request'
+    event = "plus_request"
     struct = struct(plus_version=BIN_PLUSTIMESTAMP)
 
 
 @PlusAcknowledgement.register(True)  # server-side
 class PlusDetails(BinaryPayload):
-    event = 'plus_details'
+    event = "plus_details"
     struct = struct(
         unknown=Byte,
         health_info=Byte,
@@ -773,14 +782,14 @@ class PlusDetails(BinaryPayload):
             no_blink=Flag,
             no_movement=Flag,
             friendly_fire=Flag,
-            plus_only=Flag
-        )
+            plus_only=Flag,
+        ),
     )
 
 
 @packet_id(0x40)
 class ConsoleMessage(BinaryPayload):
-    event = 'console'
+    event = "console"
     struct = struct(
         message_type=Byte,
         content=GreedyString(MAIN_ENCODING)
@@ -794,97 +803,79 @@ class ConsoleMessage(BinaryPayload):
 
 @packet_id(0x41)
 class Spectate(BinaryPayload):
-    event = 'spectate_pkt'
-    struct = struct(
-        packet_type=Byte,
-        buffer=GreedyBytes
-    )
+    event = "spectate_pkt"
+    struct = struct(packet_type=Byte, buffer=GreedyBytes)
 
     def _get_impl_key(self, context):
-        return self._data['packet_type']
+        return self._data["packet_type"]
 
     def _set_impl_key(self, key, context):
-        self._data['packet_type'] = key
+        self._data["packet_type"] = key
 
     def _impl_data(self, deserialization=False):
-        return self._data['buffer']
+        return self._data["buffer"]
 
 
 @Spectate.register(0)
 class _SpectatorList(BinaryPayload):
-    event = 'spectator_list'
+    event = "spectator_list"
     struct = struct(spectators=Bitwise(Array(8, BitsSwapped(Bytes(4)))))
 
 
 @Spectate.register(1)
 class _Spectators(BinaryPayload):
-    event = 'spectators'
+    event = "spectators"
     struct = struct(
         spectators=GreedyRange(
-            struct(
-                is_out=Flag,
-                client_id=Int8sb,
-                spectate_target=BIN_SPECTATETARGET
-            )
+            struct(is_out=Flag, client_id=Int8sb, spectate_target=BIN_SPECTATETARGET)
         )
     )
 
 
 @packet_id(0x42)
 class SpectateRequest(BinaryPayload):
-    event = 'spectate'
+    event = "spectate"
     struct = struct(
         spectating=Byte,
     )
 
     def feed(self, changes):
-        if 'spectating' in changes:
-            changes['spectating'] = 20 + (changes['spectating'] % 2)
+        if "spectating" in changes:
+            changes["spectating"] = 20 + (changes["spectating"] % 2)
         super().feed(changes)
 
 
 @packet_id(0x45)
 class GameState(BinaryPayload):
-    event = 'game_state'
+    event = "game_state"
     struct = struct(
-        state=BitStruct(
-            pad=Padding(5),
-            in_overtime=Bytes(2),
-            game_started=Flag
-        ),
-        time_left=Int
+        state=BitStruct(pad=Padding(5), in_overtime=Bytes(2), game_started=Flag),
+        time_left=Int,
     )
 
 
 @packet_id(0x49)
 class Latency(BinaryPayload):
-    event = 'latencies'
-    struct = struct(
-        latencies=GreedyRange(
-            struct(
-                player_id=Byte,
-                latency=Short
-            )
-        )
-    )
+    event = "latencies"
+    struct = struct(latencies=GreedyRange(struct(player_id=Byte, latency=Short)))
 
     def data(self, deserialization=True, to_impl=False):
         data = super().data(deserialization, to_impl)
         if deserialization:
-            for latency_details in data['latencies']:
-                latency_details['latency'] >>= 8
+            for latency_details in data["latencies"]:
+                latency_details["latency"] >>= 8
         return data
 
 
 @packet_id(0x51)
 class Ready(BinaryPayload):
-    event = 'ready'
+    event = "ready"
     struct = struct()
 
 
 @packet_id(0x5A)
 class ResourceList(BinaryPayload):
-    event = 'scripts'
+    event = "scripts"
     struct = struct(
         level_challenge=Byte[4],
         script_data=Byte[5],
@@ -893,7 +884,7 @@ class ResourceList(BinaryPayload):
                 unknown_data=Byte[5],
                 filename=PascalString(Byte, MAIN_ENCODING),
             )
-        )
+        ),
     )
 
 
@@ -903,29 +894,25 @@ def _setup_registrar_ip(registered, ip):
         _setup_registrar_ip(impl, ip)
 
 
-class GameProtocol(
-    Protocol,
-    asyncio.Protocol,
-    asyncio.DatagramProtocol
-):
+class GameProtocol(Protocol, asyncio.Protocol, asyncio.DatagramProtocol):
     payload_cls = GamePayload
 
     def __init__(
-            self,
-            protocol=None,
-            *,
-            engine,
-            future,
-            bot=True,
-            capture_packets=True,
-            from_server=True,
-            chat=True,
-            notice_players=True,
-            download_files=True,
-            passwords=True,
-            spectating=True,
-            update_latencies=True,
-            **config
+        self,
+        protocol=None,
+        *,
+        engine,
+        future,
+        bot=True,
+        capture_packets=True,
+        from_server=True,
+        chat=True,
+        notice_players=True,
+        download_files=True,
+        passwords=True,
+        spectating=True,
+        update_latencies=True,
+        **config,
     ):
         super().__init__(
             protocol,
@@ -938,7 +925,7 @@ class GameProtocol(
             passwords=passwords,
             spectating=spectating,
             update_latencies=update_latencies,
-            **config
+            **config,
         )
         self.engine = engine
         self.session = Session(self)
@@ -954,9 +941,9 @@ class GameProtocol(
         return self._future
 
     def connection_made(self, transport):
-        if hasattr(transport, 'sendto'):
+        if hasattr(transport, "sendto"):
             self._udp_transport = transport
-            self._udp_addr, source_port = transport.get_extra_info('sockname', 0)
+            self._udp_addr, source_port = transport.get_extra_info("sockname", 0)
             self.session.udp_source_port = source_port
         else:
             self._tcp_transport = transport
@@ -965,6 +952,7 @@ class GameProtocol(
         self._tcp_transport = None
         self._udp_transport = None
         self.future.cancel()
+        self.session.introduced = False
 
     def send(self, data: bytes):
         length = len(data) + 1
@@ -984,9 +972,9 @@ class GameProtocol(
 
     def submit(self, payload):
         ip = payload.ip.lower()
-        if ip == 'tcp':
+        if ip == "tcp":
             self.send(payload.serialize(context=self.session))
-        if ip == 'udp':
+        if ip == "udp":
             self.sendto(payload.serialize(context=self.session, checksum=True))
         return self
 
@@ -1014,7 +1002,7 @@ class GameProtocol(
                 eof -= deficit
                 deficit = 0
         else:
-            raise ValueError(f'{deficit=} < 0')
+            raise ValueError(f"{deficit=} < 0")
 
         self._buffer.extend(data[bof:eof])
         self._deficit = deficit
@@ -1030,23 +1018,20 @@ class GameProtocol(
         self.handle_data(data, context=self.session, checksum=data[:2])
 
     def eof_received(self):
-        self.engine.dispatch(self, 'eof')
+        self.engine.dispatch(self, "eof")
         return False
 
     def error_received(self, exc):
-        super().on_error(msg=f'send/receive operation of UDP ({exc})')
+        super().on_error(msg=f"send/receive operation of UDP ({exc})")
 
     @classmethod
     def register(
-            cls,
-            registered=None,
-            condition=None, *,
-            ip: Literal['tcp', 'udp'] = None
+        cls, registered=None, condition=None, *, ip: Literal["tcp", "udp"] = None
     ):
         if registered is None:
             return functools.partial(cls.register, registered, condition, ip=ip)
         if ip is None:
-            raise ValueError('ip (internet protocol) must be either TCP or UDP')
+            raise ValueError("ip (internet protocol) must be either TCP or UDP")
         registered = super().register(registered, condition)
         _setup_registrar_ip(registered, ip)
         return registered
@@ -1054,77 +1039,78 @@ class GameProtocol(
     @handles(ServerDetails, priority=Priority.URGENT)
     def on_server_details(self, payload: ServerDetails):
         data = payload.data()
-        self.session.client_id = data['client_id']
+        self.session.client_id = data["client_id"]
 
-        extras = data.get('extras')
+        extras = data.get("extras")
         if extras:
-            self.session.level_challenge = extras['level_challenge']
-            self.session.heartbeat_cookie = extras['heartbeat_cookie']
+            self.session.level_challenge = extras["level_challenge"]
+            self.session.heartbeat_cookie = extras["heartbeat_cookie"]
 
     @handles(ResourceList, priority=Priority.URGENT)
     def on_script_list(self, payload: ResourceList):
         data = payload.data()
-        self.session.level_challenge = data['level_challenge']
+        self.session.level_challenge = data["level_challenge"]
         self.session.scripts = [
-            Resource(**script_data)
-            for script_data in data['scripts']
+            Resource(**script_data) for script_data in data["scripts"]
         ]
 
     @handles(ClientDisconnect, priority=Priority.URGENT)
     def on_client_disconnect(self, payload: ClientDisconnect):
         data = payload.data()
-        if data['client_id'] == -1:
+        if data["client_id"] == -1:
             self.connection_lost()
 
     @handles(Heartbeat, priority=Priority.URGENT)
     def on_heartbeat(self, payload: Heartbeat):
         data = payload.data()
-        latency = data['heartbeat_latency']
-        self.session.heartbeat_latency = min((random.randint(latency+1, latency+20), 255))
-        self.session.heartbeat_cookie = list(data['heartbeat_cookie'])
+        latency = data["heartbeat_latency"]
+        self.session.heartbeat_latency = min(
+            (random.randint(latency + 1, latency + 20), 255)
+        )
+        self.session.heartbeat_cookie = list(data["heartbeat_cookie"])
 
     @handles(LevelLoad, priority=Priority.URGENT)
     def on_level_load(self, payload: LevelLoad):
         data = payload.data()
-        self.session.level_file_name = data['level_file_name']
-        self.session.level_challenge = data['level_challenge']
+        self.session.level_file_name = data["level_file_name"]
+        self.session.level_challenge = data["level_challenge"]
 
     @handles(ALL_PAYLOADS, priority=Priority.NORMAL)
     def dispatch(self, payload):
         self.engine.dispatch(self, payload)
 
 
-GameProtocol.register(ChatMessage, If.configured(chat=True), ip='tcp')
-GameProtocol.register(ClientDetails, If.configured(notice_players=True), ip='tcp')
-GameProtocol.register(ClientDisconnect, If.configured(notice_players=True), ip='tcp')
-GameProtocol.register(ConsoleMessage, If.configured(chat=True), ip='tcp')
-GameProtocol.register(DownloadingFile, If.configured(download_files=True), ip='tcp')
-GameProtocol.register(DownloadRequest, If.configured(download_files=True), ip='tcp')
-GameProtocol.register(EndOfLevel, ip='tcp')
-GameProtocol.register(GameEvent, ip='udp')
-GameProtocol.register(GameInit, ip='tcp')
-GameProtocol.register(GameState, ip='udp')
-GameProtocol.register(Heartbeat, ip='udp')
-GameProtocol.register(PlayerList, ip='tcp')
-GameProtocol.register(JoinRequest, ip='tcp')
-GameProtocol.register(Latency, If.configured(update_latencies=True), ip='tcp')
-GameProtocol.register(LevelLoad, ip='tcp')
+GameProtocol.register(ChatMessage, If.configured(chat=True), ip="tcp")
+GameProtocol.register(ClientDetails, If.configured(notice_players=True), ip="tcp")
+GameProtocol.register(ClientDisconnect, If.configured(notice_players=True), ip="tcp")
+GameProtocol.register(ConsoleMessage, If.configured(chat=True), ip="tcp")
+GameProtocol.register(DownloadingFile, If.configured(download_files=True), ip="tcp")
+GameProtocol.register(DownloadRequest, If.configured(download_files=True), ip="tcp")
+GameProtocol.register(EndOfLevel, ip="tcp")
+GameProtocol.register(GameEvent, ip="udp")
+GameProtocol.register(GameInit, ip="tcp")
+GameProtocol.register(GameState, ip="udp")
+GameProtocol.register(Heartbeat, ip="udp")
+GameProtocol.register(PlayerList, ip="tcp")
+GameProtocol.register(JoinRequest, ip="tcp")
+GameProtocol.register(Latency, If.configured(update_latencies=True), ip="tcp")
+GameProtocol.register(LevelLoad, ip="tcp")
 # GameProtocol.register(Password, If.configured(passwords=True), ip='udp')
 # GameProtocol.register(PasswordCheck, If.configured(passwords=True), ip='udp')
-GameProtocol.register(Ping, ip='udp')
-GameProtocol.register(PlusAcknowledgement, If.configured(latest_plus=True), ip='tcp')
-GameProtocol.register(Pong, ip='udp')
-GameProtocol.register(Query, ip='udp')
-GameProtocol.register(QueryReply, ip='udp')
-GameProtocol.register(ResourceList, ip='tcp')
-GameProtocol.register(ServerDetails, ip='tcp')
-GameProtocol.register(ServerStopped, ip='tcp')
-GameProtocol.register(Spectate, If.configured(spectating=True), ip='tcp')
-GameProtocol.register(SpectateRequest, If.configured(spectating=True), ip='tcp')
-GameProtocol.register(UpdateEvents, ip='tcp')
-GameProtocol.register(PlayerList, If.configured(notice_players=True), ip='tcp')
-GameProtocol.register(Ready, ip='tcp')
-GameProtocol.register(UpdateRequest, ip='tcp')
+GameProtocol.register(Ping, ip="udp")
+GameProtocol.register(PlusAcknowledgement, If.configured(latest_plus=True), ip="tcp")
+GameProtocol.register(Pong, ip="udp")
+GameProtocol.register(Query, ip="udp")
+GameProtocol.register(QueryReply, ip="udp")
+GameProtocol.register(ResourceList, ip="tcp")
+GameProtocol.register(ServerDetails, ip="tcp")
+GameProtocol.register(ServerStopped, ip="tcp")
+GameProtocol.register(Spectate, If.configured(spectating=True), ip="tcp")
+GameProtocol.register(SpectateRequest, If.configured(spectating=True), ip="tcp")
+GameProtocol.register(UpdateEvents, ip="tcp")
+GameProtocol.register(PlayerList, If.configured(notice_players=True), ip="tcp")
+GameProtocol.register(Ready, ip="tcp")
+GameProtocol.register(UpdateRequest, ip="tcp")
 
 
 @GameProtocol.handles(ALL_PAYLOADS, If.configured(bot=True))
@@ -1132,21 +1118,14 @@ class BotProtocol(Protocol, extends=GameProtocol):
     """Packet coordination in the background using default bot behavior."""
 
     def __init__(
-            self,
-            protocol=None, *,
-            join_servers=True,
-            autospectate=True,
-            **config
+        self, protocol=None, *, join_servers=True, autospectate=True, **config
     ):
         if protocol is None:
             raise ValueError(
-                'the bot protocol relies on running instance of the gameplay protocol'
+                "the bot protocol relies on running instance of the gameplay protocol"
             )
         super().__init__(
-            protocol,
-            join_servers=join_servers,
-            autospectate=autospectate,
-            **config
+            protocol, join_servers=join_servers, autospectate=autospectate, **config
         )
 
     @property
@@ -1156,23 +1135,24 @@ class BotProtocol(Protocol, extends=GameProtocol):
     @handles(ServerDetails, priority=Priority.IMPORTANT)
     def on_server_details(self, _):
         self.submit_all(
-            Heartbeat(heartbeat_latency=0),
-            PlusRequest.from_dict(self.session)
+            Heartbeat(heartbeat_latency=0), PlusRequest.from_dict(self.session)
         )
 
     @handles(Heartbeat, priority=Priority.IMPORTANT)
     @handles(ResourceList, priority=Priority.IMPORTANT)
     def on_script_list(self, _):
-        self.submit(Heartbeat(
-            heartbeat_latency=self.session.get('heartbeat_latency') or 1,
-            heartbeat_cookie=bytes(self.session.get('heartbeat_cookie', 0))
-        ))
+        self.submit(
+            Heartbeat(
+                heartbeat_latency=self.session.get("heartbeat_latency") or 1,
+                heartbeat_cookie=bytes(self.session.get("heartbeat_cookie", 0)),
+            )
+        )
 
     @handles(PlusDetails, If.configured(join_servers=True), priority=Priority.IMPORTANT)
     def on_plus_details(self, _):
-        if not self.session.client_details_sent:
+        if not self.session.introduced:
             self.submit(ClientDetails.from_dict(self.session))
-            self.session.client_details_sent = True
+            self.session.introduced = True
 
     @handles(LevelLoad, priority=Priority.IMPORTANT)
     @handles(Ready, priority=Priority.IMPORTANT)
@@ -1183,8 +1163,8 @@ class BotProtocol(Protocol, extends=GameProtocol):
 
 class GameClient(Client):
     def __init__(self, local_players, **config):
-        config['from_server'] = True
-        config.setdefault('bot', True)
+        config["from_server"] = True
+        config.setdefault("bot", True)
         super().__init__(**config)
         self.local_players = local_players
 
@@ -1195,8 +1175,12 @@ class GameClient(Client):
             await asyncio.wait(futs, timeout=timeout)
 
     async def connect(self, host, port=10052) -> GameProtocol:
-        protocol = GameProtocol(engine=self, future=self.loop.create_future(), **self.config)
+        protocol = GameProtocol(
+            engine=self, future=self.loop.create_future(), **self.config
+        )
         protocol.session.local_players = self.local_players
         await self.loop.create_connection(lambda: protocol, host=host, port=port)
-        await self.loop.create_datagram_endpoint(lambda: protocol, remote_addr=(host, port))
+        await self.loop.create_datagram_endpoint(
+            lambda: protocol, remote_addr=(host, port)
+        )
         return self.register_protocol((host, port), protocol)
